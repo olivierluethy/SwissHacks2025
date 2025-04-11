@@ -167,6 +167,57 @@ def process_sheet(ws):
     for bounds in expanded_blocks:
         top, bottom, left, right = bounds
         
+        # Check the first row for a single non-empty cell to use as title
+        title = "Untitled Subtable"
+        skip_first_row = False
+        if top <= bottom:  # Ensure there's at least one row
+            first_row = matrix[top][left:right + 1]
+            non_empty_cells = [cell for cell in first_row if is_nonempty(cell)]
+            if len(non_empty_cells) == 1 and all(not is_nonempty(matrix[top][c]) for c in range(left, right + 1) if c != left):
+                # First row has exactly one non-empty cell in the leftmost column
+                title = str(non_empty_cells[0]["value"]).strip()
+                skip_first_row = True
+        
+        # Set the title
+        html_fragments.append(f"<h3>{escape(title)}</h3>")
+        
+        # Adjust the top boundary if skipping the first row
+        table_top = top + 1 if skip_first_row else top
+        
+        # Convert the block to an HTML table
+        if table_top <= bottom:  # Only generate table if there's data left
+            table_html = dataframe_to_html(matrix, (table_top, bottom, left, right))
+            html_fragments.append(table_html)
+        html_fragments.append("<hr>")
+    
+    return "\n".join(html_fragments)
+    """
+    Process an openpyxl worksheet: build a cell matrix (with color info),
+    use BFS to find clusters, expand clusters upward to include header rows
+    (by looking at cell fill colors), and produce HTML for each subtable.
+    """
+    matrix = get_sheet_matrix(ws)
+    nrows = len(matrix)
+    if nrows == 0:
+        return "<p>No data found in this sheet.</p>"
+    ncols = len(matrix[0])
+    
+    # Find clusters of adjacent nonempty cells.
+    blocks = bfs_components(matrix)
+    
+    # Expand each block upward based on header cell fill colors.
+    expanded_blocks = []
+    for bounds in blocks:
+        expanded = expand_upward_for_headers(matrix, bounds, max_expand=3)
+        expanded_blocks.append(expanded)
+    
+    # Optional: sort blocks by their top and left positions.
+    expanded_blocks.sort(key=lambda b: (b[0], b[2]))
+    
+    html_fragments = []
+    for bounds in expanded_blocks:
+        top, bottom, left, right = bounds
+        
         # Try to form a title from the top rows of the block if header cells are present.
         title_lines = []
         # We take the top 1-2 rows of the block as candidate header lines if they contain header cells.
