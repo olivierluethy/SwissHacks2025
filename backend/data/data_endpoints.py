@@ -89,20 +89,16 @@ async def get_file_contents(filename: str):
 # Combines both previous endpoints: given a text input, return the concatenated contents of the top K most
 # semantically similar files. The resulting string includes a header with the filename of each file used,
 # and also linebreaks between the contents of each file.
-@router.post("/top_k_related_files_contents", response_class=PlainTextResponse)
-async def get_top_k_related_files_contents(request: InputTextRequest):
-    input_text = request.input_text
-    k = request.k
-
+def get_top_k_related_files_contents(input_text: str, k: int = 5) -> str:
     # Load embeddings
     if not os.path.exists(EMBEDDINGS_FILE):
-        raise HTTPException(status_code=404, detail=f"Embeddings file '{EMBEDDINGS_FILE}' not found.")
+        raise FileNotFoundError(f"Embeddings file '{EMBEDDINGS_FILE}' not found.")
 
     with open(EMBEDDINGS_FILE, "r", encoding="utf-8") as f:
         embeddings_dict = json.load(f)
 
     if not embeddings_dict:
-        raise HTTPException(status_code=400, detail="Embeddings data is empty.")
+        raise ValueError("Embeddings data is empty.")
 
     # Load model and compute similarity
     model = SentenceTransformer(MODEL_NAME)
@@ -120,12 +116,25 @@ async def get_top_k_related_files_contents(request: InputTextRequest):
     for filename in top_filenames:
         file_path = BASE_FOLDER / filename
         if not file_path.exists() or not file_path.is_file():
-            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+            raise FileNotFoundError(f"File not found: {filename}")
         try:
             with open(file_path, "r", encoding="utf-8") as f:
-                combined_content += f"\n--- {filename} ---\n"
+                combined_content += f"\n\n--------------------------\n--- {filename} ---\n"
                 combined_content += f.read()
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error reading file '{filename}': {str(e)}")
+            raise IOError(f"Error reading file '{filename}': {str(e)}")
+    combined_content += "\n\n-------- End of context -----------\n"
 
     return combined_content.strip()
+
+# API endpoint of the previous function
+@router.post("/top_k_related_files_contents", response_class=PlainTextResponse)
+async def get_top_k_related_files_contents_endpoint(request: InputTextRequest):
+    try:
+        return get_top_k_related_files_contents(request.input_text, request.k)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except IOError as e:
+        raise HTTPException(status_code=500, detail=str(e))

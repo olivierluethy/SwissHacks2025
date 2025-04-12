@@ -16,9 +16,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import re
 from openai import OpenAI
-from data import data_endpoints
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 from pydantic import BaseModel
+
+# For RAG
+from data import data_endpoints
+from data.data_endpoints import get_top_k_related_files_contents
 
 # Set your OpenAI API key (ensure this key is available in your environment)
 MODEL_NAME = "o3-mini"  # Or "gpt-4" if desired
@@ -260,7 +263,7 @@ def clean_and_parse_json(text: str):
         raise error
 
 
-def generate_overview(markdown_text: str) -> str:
+def generate_overview(markdown_text: str, context: str) -> str:
     """
     Queries the AI for the overview part of the JSON.
     The resulting JSON should only contain the "title" and "markdown" fields.
@@ -288,6 +291,9 @@ JSON Schema for this part:
   }}
 }}
 
+Use the following context:
+{context}
+
 Markdown input to analyze:
 {markdown_text}
 
@@ -296,7 +302,7 @@ Ensure that you output only JSON following the schema.
     return query_ai(prompt)
 
 
-def generate_key_insights(markdown_text: str) -> str:
+def generate_key_insights(markdown_text: str, context: str) -> str:
     """
     Queries the AI to generate the 'keyInsights' array.
     Each insight contains title, description, impact, and confidence.
@@ -339,6 +345,9 @@ JSON Schema for keyInsights:
   }}
 }}
 
+Use the following context:
+{context}
+
 Markdown input to analyze:
 {markdown_text}
 
@@ -347,7 +356,7 @@ Return only a JSON array that strictly adheres to the schema.
     return query_ai(prompt)
 
 
-def generate_tabs(markdown_text: str) -> str:
+def generate_tabs(markdown_text: str, context: str) -> str:
     """
     Queries the AI to generate the 'tabs' array.
     Each tab includes an id, a title, and content (either a JSON chart or an HTML string).
@@ -435,6 +444,9 @@ JSON Schema for tabs:
   }}
 }}
 
+Use the following context:
+{context}
+
 Markdown input to analyze:
 {markdown_text}
 
@@ -448,22 +460,23 @@ async def analyze(request: AnalysisRequest):
     # Read all files from the provided folder and combine their contents.
     try:
         markdown_text = read_all_files_from_folder(request.folder_name)
+        context = get_top_k_related_files_contents(markdown_text, k=10)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
         # Query for the overview (title and markdown summary)
-        overview_json_str = generate_overview(markdown_text)
+        overview_json_str = generate_overview(markdown_text, context)
         print("Overview JSON:", overview_json_str)
         overview = clean_and_parse_json(overview_json_str)
 
         # Query for key insights array
-        key_insights_json_str = generate_key_insights(markdown_text)
+        key_insights_json_str = generate_key_insights(markdown_text, context)
         print("Key Insights JSON:", key_insights_json_str)
         key_insights = clean_and_parse_json(key_insights_json_str)
 
         # Query for tabs array
-        tabs_json_str = generate_tabs(markdown_text)
+        tabs_json_str = generate_tabs(markdown_text, context)
         print("Tabs JSON:", tabs_json_str)
         tabs = clean_and_parse_json(tabs_json_str)
     except Exception as e:
