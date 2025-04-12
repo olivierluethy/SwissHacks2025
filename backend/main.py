@@ -15,13 +15,15 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import re
-import ollama
+from openai import OpenAI
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 from pydantic import BaseModel
 
-MODEL_NAME = "llama3.1"  # Ensure this exactly matches the model name
+# Set your OpenAI API key (ensure this key is available in your environment)
+MODEL_NAME = "o3-mini"  # Or "gpt-4" if desired
 
 app = FastAPI()
-
 
 # -----------------------------
 # Directory Setup
@@ -213,19 +215,45 @@ def read_all_files_from_folder(folder_name: str) -> str:
 
 def query_ai(prompt: str, model_name: str = MODEL_NAME) -> str:
     """
-    Sends the provided prompt to the AI model and returns the cleaned JSON response.
+    Sends the provided prompt to the ChatGPT API and returns the raw text response.
     Removes any <think> sections that the model might include.
     """
     try:
-        response = ollama.chat(
+        response = client.chat.completions.create(
             model=model_name, messages=[{"role": "user", "content": prompt}]
         )
-        content = response["message"]["content"]
+        # Extract the assistant's message content.
+        content = response.choices[0].message.content
         # Remove any embedded <think> sections if present.
         cleaned_content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
         return cleaned_content.strip()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error querying the AI: {e}")
+
+
+def clean_and_parse_json(text: str):
+    """
+    Cleans the text by removing markdown code fences and applying regex fixes
+    for common JSON errors, then attempts to parse it.
+    """
+    # Remove markdown code blocks (```json or ```)
+    text = re.sub(r"```json\s*|```\s*", "", text).strip()
+
+    # Ensure keys are quoted properly:
+    text = re.sub(r"([{,]\s*)(\w+)(\s*:)", r'\1"\2"\3', text)
+
+    # Fix string values that might not be properly quoted
+    text = re.sub(r':\s*"([^"]*)"([^,\]}])', r': "\1"\2', text)
+
+    # Remove any trailing commas in objects or arrays
+    text = re.sub(r",\s*([\]}])", r"\1", text)
+
+    try:
+        return json.loads(text)
+    except Exception as error:
+        print("Error parsing JSON:", error)
+        print("Cleaned text was:", text)
+        raise error
 
 
 def generate_overview(markdown_text: str) -> str:
@@ -267,7 +295,7 @@ Ensure that you output only JSON following the schema.
 def generate_key_insights(markdown_text: str) -> str:
     """
     Queries the AI to generate the 'keyInsights' array.
-    Each insight contains title, description, impact and confidence.
+    Each insight contains title, description, impact, and confidence.
     """
     prompt = f"""
 Generate your result following the JSON schema as defined below.
@@ -422,15 +450,18 @@ async def analyze(request: AnalysisRequest):
     try:
         # Query for the overview (title and markdown summary)
         overview_json_str = generate_overview(markdown_text)
-        overview = json.loads(overview_json_str)
+        print("Overview JSON:", overview_json_str)
+        overview = clean_and_parse_json(overview_json_str)
 
         # Query for key insights array
         key_insights_json_str = generate_key_insights(markdown_text)
-        key_insights = json.loads(key_insights_json_str)
+        print("Key Insights JSON:", key_insights_json_str)
+        key_insights = clean_and_parse_json(key_insights_json_str)
 
         # Query for tabs array
         tabs_json_str = generate_tabs(markdown_text)
-        tabs = json.loads(tabs_json_str)
+        print("Tabs JSON:", tabs_json_str)
+        tabs = clean_and_parse_json(tabs_json_str)
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error processing AI responses: {e}"
@@ -446,12 +477,6 @@ async def analyze(request: AnalysisRequest):
     return final_result
 
 
-# To run the API, use the following command:
-# uvicorn your_filename:app --reload
-
-
-# To run the API, use the following command:
-# uvicorn your_filename:app --reload
 # -----------------------------
 # Main Execution
 # -----------------------------
