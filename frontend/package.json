@@ -32,7 +32,7 @@
     "@radix-ui/react-slider": "^1.2.2",
     "@radix-ui/react-slot": "^1.1.1",
     "@radix-ui/react-switch": "^1.1.2",
-    "@radix-ui/react-tabs": "^1.1.2",
+    "@radix-ui/react-tabs": "latest",
     "@radix-ui/react-toast": "^1.2.4",
     "@radix-ui/react-toggle": "^1.1.1",
     "@radix-ui/react-toggle-group": "^1.1.1",
@@ -58,9 +58,10 @@
     "tailwindcss-animate": "^1.0.7",
     "vaul": "^0.9.6",
     "zod": "^3.24.1",
-    "axios": "latest",
     "uuid": "latest",
-    "jszip": "latest"
+    "jszip": "latest",
+    "axios": "latest",
+    "react-markdown": "latest"
   },
   "devDependencies": {
     "@types/node": "^22",

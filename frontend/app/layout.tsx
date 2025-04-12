@@ -1,7 +1,6 @@
 import type React from "react"
 import { Inter } from "next/font/google"
 import "./globals.css"
-import { SubmissionProvider } from "@/contexts/SubmissionContext"
 
 const inter = Inter({ subsets: ["latin"] })
 
@@ -19,12 +18,14 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        <SubmissionProvider>
-          <div className="app">
-            {/* Navigation is now conditionally rendered in each page */}
-            <div className="main-content">{children}</div>
-          </div>
-        </SubmissionProvider>
+        <div className="min-h-screen bg-gray-50">
+          <header className="bg-white border-b border-gray-200 py-4">
+            <div className="max-w-7xl mx-auto px-6">
+              <h1 className="text-xl font-bold text-gray-800">ARCHRE</h1>
+            </div>
+          </header>
+          <main className="py-6">{children}</main>
+        </div>
       </body>
     </html>
   )
