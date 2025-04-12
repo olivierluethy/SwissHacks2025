@@ -1,21 +1,78 @@
 import io
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import Response
+import time
+import json
+import shutil
+import zipfile
+import asyncio
+from uuid import uuid4
+from datetime import datetime
+from threading import Lock
+from typing import List
+
+from fastapi import (
+    FastAPI,
+    UploadFile,
+    File,
+    HTTPException,
+    Path,
+    BackgroundTasks,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from html import escape
 from collections import deque
-from openpyxl import load_workbook
 from tempfile import NamedTemporaryFile
+from openpyxl import load_workbook
 
-# Existing Excel processing code begins here ...
+# -----------------------------
+# Directory Setup
+# -----------------------------
+UPLOAD_DIR = "uploads"
+PROCESSING_DIR = "processing"
+PROCESSED_DIR = "processed"
+ANALYSIS_DIR = "analysis"
+PROGRESS_DIR = "progress"  # Persist progress per submission
 
+for folder in [UPLOAD_DIR, PROCESSING_DIR, PROCESSED_DIR, ANALYSIS_DIR, PROGRESS_DIR]:
+    os.makedirs(folder, exist_ok=True)
+
+# Lock for progress file writes
+progress_lock = Lock()
+
+
+# -----------------------------
+# Utility: Persistent progress
+# -----------------------------
+def get_progress_path(submission_id: str) -> str:
+    return os.path.join(PROGRESS_DIR, f"progress_{submission_id}.json")
+
+
+def load_progress(submission_id: str) -> dict:
+    progress_path = get_progress_path(submission_id)
+    if os.path.exists(progress_path):
+        with open(progress_path, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_progress(submission_id: str, data: dict):
+    progress_path = get_progress_path(submission_id)
+    with progress_lock:
+        with open(progress_path, "w") as f:
+            json.dump(data, f, indent=2)
+
+
+# -----------------------------
+# Excel/PDF Conversion Functions
+# -----------------------------
 DEFAULT_FILL_COLORS = {None, "00000000", "FFFFFFFF"}
 
 
 def get_cell_info(cell):
-    """
-    Return a dictionary with the cell's value and its fill color (RGB string if available).
-    """
     val = cell.value
     color = None
     if cell.fill and cell.fill.fill_type:
@@ -24,17 +81,10 @@ def get_cell_info(cell):
 
 
 def apply_merged_cells(ws, matrix):
-    """
-    Propagate values and colors from the top-left cell of merged areas.
-    Also return a dictionary mapping cell coordinates to merged cell information.
-    """
-    merged_cell_map = {}  # Maps (row, col) to merged range bounds
-
+    merged_cell_map = {}
     for merged_range in ws.merged_cells.ranges:
         min_col, min_row, max_col, max_row = merged_range.bounds
         base_cell = matrix[min_row - 1][min_col - 1]
-
-        # Store the merged range information
         merged_cell_map[(min_row - 1, min_col - 1)] = {
             "min_row": min_row - 1,
             "min_col": min_col - 1,
@@ -43,23 +93,16 @@ def apply_merged_cells(ws, matrix):
             "rowspan": max_row - min_row + 1,
             "colspan": max_col - min_col + 1,
         }
-
-        # Propagate values to all cells in the merged range
         for r in range(min_row - 1, max_row):
             for c in range(min_col - 1, max_col):
                 if (r, c) != (min_row - 1, min_col - 1):
                     matrix[r][c]["value"] = base_cell["value"]
                     matrix[r][c]["color"] = base_cell["color"]
-                    # Mark other cells in the merged range
                     matrix[r][c]["merged_into"] = (min_row - 1, min_col - 1)
-
     return merged_cell_map
 
 
 def get_sheet_matrix(ws):
-    """
-    Read the worksheet into a 2D matrix of dictionaries.
-    """
     max_row = ws.max_row
     max_col = ws.max_column
     matrix = []
@@ -67,62 +110,39 @@ def get_sheet_matrix(ws):
         row_vals = []
         for c in range(1, max_col + 1):
             cell_info = get_cell_info(ws.cell(row=r, column=c))
-            cell_info["merged_into"] = (
-                None  # Will be set in apply_merged_cells if applicable
-            )
+            cell_info["merged_into"] = None
             row_vals.append(cell_info)
         matrix.append(row_vals)
-
     merged_cell_map = apply_merged_cells(ws, matrix)
     return matrix, merged_cell_map
 
 
 def is_nonempty(cell_info):
-    """
-    Return True if the cell is nonempty.
-    """
     val = cell_info["value"]
     return val is not None and str(val).strip() != ""
 
 
 def is_header_cell(cell_info):
-    """
-    A cell qualifies as a header if its fill color is not a default color.
-    """
     color = cell_info["color"]
     return color not in DEFAULT_FILL_COLORS
 
 
 def is_title_candidate(matrix, r, c, merged_cell_map):
-    """
-    Check if a cell is likely to be a title based on:
-    1. It's a merged cell that spans multiple columns
-    2. It's positioned at the top of a data region
-    3. It has content
-    """
     cell_key = (r, c)
     if cell_key in merged_cell_map:
         merged_info = merged_cell_map[cell_key]
         if merged_info["colspan"] > 1 and is_nonempty(matrix[r][c]):
             return True
-
     if is_nonempty(matrix[r][c]) and is_header_cell(matrix[r][c]):
         return True
-
     return False
 
 
 def smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1):
-    """
-    Use BFS to detect connected components of nonempty cells.
-    Allows for small gaps to connect nearby cells.
-    """
     nrows = len(matrix)
     ncols = len(matrix[0]) if nrows else 0
     visited = [[False] * ncols for _ in range(nrows)]
     components = []
-
-    # Identify potential title cells
     title_cells = set()
     for r in range(nrows):
         for c in range(ncols):
@@ -135,13 +155,10 @@ def smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1):
                             merged_info["min_col"], merged_info["max_col"] + 1
                         ):
                             title_cells.add((mr, mc))
-
-    # Process cells in order
     for r in range(nrows):
         for c in range(ncols):
             if visited[r][c] or not is_nonempty(matrix[r][c]):
                 continue
-
 
             q = deque()
             q.append((r, c))
@@ -150,14 +167,12 @@ def smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1):
             min_r, max_r = r, r
             min_c, max_c = c, c
             has_title = (r, c) in title_cells
-
             while q:
                 cr, cc = q.popleft()
                 min_r = min(min_r, cr)
                 max_r = max(max_r, cr)
                 min_c = min(min_c, cc)
                 max_c = max(max_c, cc)
-
                 for dr in range(-max_v_gap, max_v_gap + 1):
                     for dc in range(-max_h_gap, max_h_gap + 1):
                         if dr == 0 and dc == 0:
@@ -173,8 +188,6 @@ def smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1):
                                 component_cells.add((nr, nc))
                                 if (nr, nc) in title_cells:
                                     has_title = True
-
-            # Look for potential titles above the component if none found yet.
             title_row = None
             if not has_title:
                 for tr in range(max(0, min_r - 3), min_r):
@@ -190,8 +203,6 @@ def smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1):
                         break
                 if title_row is not None:
                     min_r = min(min_r, title_row)
-
-            # Look for footers below the component
             for fr in range(max_r + 1, min(nrows, max_r + max_v_gap + 1)):
                 footer_found = False
                 for fc in range(min_c, max_c + 1):
@@ -205,8 +216,6 @@ def smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1):
                         break
                 if not footer_found:
                     break
-
-            # Expand merged region cells into the component
             expanded_cells = set()
             for cell in component_cells:
                 r_cell, c_cell = cell
@@ -224,68 +233,50 @@ def smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1):
                                 merged_info["min_col"], merged_info["max_col"] + 1
                             ):
                                 expanded_cells.add((mr, mc))
-                                visited[mr][mc] = True
-
             if expanded_cells:
                 min_r = min(r for r, _ in expanded_cells)
                 max_r = max(r for r, _ in expanded_cells)
                 min_c = min(c for _, c in expanded_cells)
                 max_c = max(c for _, c in expanded_cells)
-
             components.append(
                 {
                     "bounds": (min_r, max_r, min_c, max_c),
                     "cells": expanded_cells,
                 }
             )
-
     components.sort(key=lambda comp: len(comp["cells"]), reverse=True)
-
     final_components = []
     used_cells = set()
     for comp in components:
         if not comp["cells"].intersection(used_cells):
             final_components.append(comp["bounds"])
             used_cells.update(comp["cells"])
-
     final_components.sort(key=lambda b: (b[0], b[2]))
     return final_components
 
 
 def is_reasonable_gap(matrix, r1, c1, r2, c2):
-    """
-    Determine if a gap between cells is reasonable based on cell alignment and content.
-    """
     if r1 == r2 or c1 == c2:
         return True
-
     if abs(r2 - r1) == 2 and c1 == c2:
         middle_r = (r1 + r2) // 2
         return not is_nonempty(matrix[middle_r][c1])
-
     if abs(c2 - c1) == 2 and r1 == r2:
         middle_c = (c1 + c2) // 2
         return not is_nonempty(matrix[r1][middle_c])
-
     if abs(r2 - r1) <= 2 and abs(c2 - c1) <= 2:
         return True
-
     return False
 
 
 def extract_title(matrix, bounds, merged_cell_map):
-    """
-    Extract a meaningful title from the table bounds, accounting for merged cells.
-    """
     top, bottom, left, right = bounds
-
     for r in range(max(0, top - 2), top + 2):
         if r >= len(matrix):
             continue
         for c in range(left, right + 1):
             if c >= len(matrix[0]):
                 continue
-
             cell_key = (r, c)
             if cell_key in merged_cell_map:
                 merged_info = merged_cell_map[cell_key]
@@ -294,7 +285,6 @@ def extract_title(matrix, bounds, merged_cell_map):
                 )
                 if span_ratio >= 0.5 and is_nonempty(matrix[r][c]):
                     return str(matrix[r][c]["value"]).strip(), r < top
-
     for r in range(max(0, top - 2), top + 2):
         if r >= len(matrix):
             continue
@@ -304,32 +294,23 @@ def extract_title(matrix, bounds, merged_cell_map):
                 continue
             if is_nonempty(matrix[r][c]):
                 non_empty_cells.append((r, c))
-
         if len(non_empty_cells) == 1:
             r_idx, c_idx = non_empty_cells[0]
             return str(matrix[r_idx][c_idx]["value"]).strip(), r_idx < top
-
     title_parts = []
     for c in range(left, right + 1):
         if c >= len(matrix[0]):
             continue
-
         if is_nonempty(matrix[top][c]) and matrix[top][c]["merged_into"] is None:
             title_parts.append(str(matrix[top][c]["value"]).strip())
-
     if title_parts:
         return " ".join(title_parts), False
-
     return "Untitled Table", False
 
 
 def dataframe_to_html(matrix, bounds, merged_cell_map):
-    """
-    Convert a submatrix to an HTML table with merged cell support.
-    """
     top, bottom, left, right = bounds
-    html_lines = []
-    html_lines.append("<table>")
+    html_lines = ["<table>"]
     for r in range(top, bottom + 1):
         if r >= len(matrix):
             continue
@@ -362,9 +343,6 @@ def dataframe_to_html(matrix, bounds, merged_cell_map):
 
 
 def dataframe_to_markdown(matrix, bounds, merged_cell_map):
-    """
-    Convert a submatrix to a Markdown table.
-    """
     top, bottom, left, right = bounds
     table_grid = []
     for r in range(top, bottom + 1):
@@ -387,15 +365,12 @@ def dataframe_to_markdown(matrix, bounds, merged_cell_map):
             )
             row.append(cell_content)
         table_grid.append(row)
-
     if not table_grid:
         return "*Empty table*"
-
     col_widths = [0] * len(table_grid[0])
     for row in table_grid:
         for i, cell in enumerate(row):
             col_widths[i] = max(col_widths[i], len(cell))
-
     md_lines = []
     header = (
         "| "
@@ -417,70 +392,11 @@ def dataframe_to_markdown(matrix, bounds, merged_cell_map):
     return "\n".join(md_lines)
 
 
-def process_sheet_html(ws):
-    """
-    Process an Excel worksheet to extract subtables as HTML.
-    """
-    matrix, merged_cell_map = get_sheet_matrix(ws)
-    if not matrix:
-        return "<p>No data found in this sheet.</p>"
-
-    blocks = smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1)
-    html_fragments = []
-    for bounds in blocks:
-        top, bottom, left, right = bounds
-        title, is_external_title = extract_title(matrix, bounds, merged_cell_map)
-        html_fragments.append(f"<h3>{escape(title)}</h3>")
-        table_top = (
-            top + 1 if not is_external_title and title != "Untitled Table" else top
-        )
-        if table_top <= bottom:
-            table_html = dataframe_to_html(
-                matrix, (table_top, bottom, left, right), merged_cell_map
-            )
-            html_fragments.append(table_html)
-        html_fragments.append("<hr>")
-    return "\n".join(html_fragments)
-
-
-def process_sheet_markdown(ws):
-    """
-    Process an Excel worksheet to extract subtables as Markdown.
-    """
-    matrix, merged_cell_map = get_sheet_matrix(ws)
-    if not matrix:
-        return "*No data found in this sheet.*"
-
-    blocks = smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1)
-    md_fragments = []
-    for bounds in blocks:
-        top, bottom, left, right = bounds
-        title, is_external_title = extract_title(matrix, bounds, merged_cell_map)
-        md_fragments.append(f"### {title}")
-        md_fragments.append("")
-        table_top = (
-            top + 1 if not is_external_title and title != "Untitled Table" else top
-        )
-        if table_top <= bottom:
-            table_md = dataframe_to_markdown(
-                matrix, (table_top, bottom, left, right), merged_cell_map
-            )
-            md_fragments.append(table_md)
-            md_fragments.append("")
-        md_fragments.append("---")
-        md_fragments.append("")
-    return "\n".join(md_fragments)
-
-
 def create_html_from_workbook_bytes(file_bytes: bytes) -> str:
-    """
-    Process each Excel sheet in the workbook (provided as bytes) to extract subtables as HTML.
-    """
     try:
         wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error loading workbook: {e}")
-
     html_lines = [
         "<!DOCTYPE html>",
         "<html>",
@@ -504,14 +420,10 @@ def create_html_from_workbook_bytes(file_bytes: bytes) -> str:
 
 
 def create_markdown_from_workbook_bytes(file_bytes: bytes) -> str:
-    """
-    Process each Excel sheet in the workbook (provided as bytes) to extract subtables as Markdown.
-    """
     try:
         wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error loading workbook: {e}")
-
     md_lines = ["# Extracted Excel Subtables", ""]
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -523,73 +435,398 @@ def create_markdown_from_workbook_bytes(file_bytes: bytes) -> str:
     return "\n".join(md_lines)
 
 
-# New imports for PDF processing
-from marker.converters.pdf import PdfConverter
-from marker.models import create_model_dict
-from marker.output import text_from_rendered
-
-app = FastAPI(title="Excel & PDF Subtable Extractor")
-
-
-@app.post("/extract")
-async def extract_subtables(
-    file: UploadFile = File(...),
-    output_format: str = Query(
-        "html",
-        regex="^(html|md)$",
-        description="Output format for Excel: 'html' or 'md'",
-    ),
-):
-    """
-    Accepts an XLSX or PDF file upload and returns the extracted content:
-    - For Excel (.xlsx): extracts subtables in HTML or Markdown.
-    - For PDF (.pdf): parses the file via PdfConverter and returns markdown (or plain text if html is requested).
-    """
-    filename = file.filename.lower()
-    try:
-        file_bytes = await file.read()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error reading the file: {e}")
-
-    if filename.endswith(".xlsx"):
-        if output_format.lower() == "md":
-            result = create_markdown_from_workbook_bytes(file_bytes)
-            media_type = "text/markdown"
-        else:
-            result = create_html_from_workbook_bytes(file_bytes)
-            media_type = "text/html"
-    elif filename.endswith(".pdf"):
-        # Write the PDF to a temporary file because PdfConverter needs a file path.
-        try:
-            with NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                tmp.write(file_bytes)
-                tmp.flush()
-                tmp_filename = tmp.name
-            converter = PdfConverter(artifact_dict=create_model_dict())
-            rendered = converter(tmp_filename)
-            text, _, images = text_from_rendered(rendered)
-            # Cleanup the temporary file
-            os.remove(tmp_filename)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Error processing PDF: {e}")
-
-        # For PDF, we use the markdown output as default.
-        if output_format.lower() == "md":
-            result = text
-            media_type = "text/markdown"
-        else:
-            # If HTML is requested, you might later convert markdown to HTML.
-            result = text
-            media_type = "text/html"
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported file type. Only .xlsx and .pdf files are supported.",
+def process_sheet_html(ws):
+    matrix, merged_cell_map = get_sheet_matrix(ws)
+    if not matrix:
+        return "<p>No data found in this sheet.</p>"
+    blocks = smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1)
+    html_fragments = []
+    for bounds in blocks:
+        top, bottom, left, right = bounds
+        title, is_external_title = extract_title(matrix, bounds, merged_cell_map)
+        html_fragments.append(f"<h3>{escape(title)}</h3>")
+        table_top = (
+            top + 1 if not is_external_title and title != "Untitled Table" else top
         )
+        if table_top <= bottom:
+            table_html = dataframe_to_html(
+                matrix, (table_top, bottom, left, right), merged_cell_map
+            )
+            html_fragments.append(table_html)
+        html_fragments.append("<hr>")
+    return "\n".join(html_fragments)
 
-    return Response(content=result, media_type=media_type)
+
+def process_sheet_markdown(ws):
+    matrix, merged_cell_map = get_sheet_matrix(ws)
+    if not matrix:
+        return "*No data found in this sheet.*"
+    blocks = smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1)
+    md_fragments = []
+    for bounds in blocks:
+        top, bottom, left, right = bounds
+        title, is_external_title = extract_title(matrix, bounds, merged_cell_map)
+        md_fragments.append(f"### {title}")
+        md_fragments.append("")
+        table_top = (
+            top + 1 if not is_external_title and title != "Untitled Table" else top
+        )
+        if table_top <= bottom:
+            table_md = dataframe_to_markdown(
+                matrix, (table_top, bottom, left, right), merged_cell_map
+            )
+            md_fragments.append(table_md)
+            md_fragments.append("")
+        md_fragments.append("---")
+        md_fragments.append("")
+    return "\n".join(md_fragments)
 
 
+# -----------------------------
+# FastAPI Application Initialization
+# -----------------------------
+app = FastAPI(title="File Processing API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve processed markdown files as static content (for testing)
+app.mount("/results", StaticFiles(directory=PROCESSED_DIR), name="results")
+
+
+# -----------------------------
+# Submission and File Processing Endpoints
+# -----------------------------
+@app.post("/submissions")
+async def create_submission(
+    background_tasks: BackgroundTasks, file: UploadFile = File(...)
+):
+    # Save uploaded file to disk
+    submission_id = str(uuid4())
+    submission_folder = os.path.join(UPLOAD_DIR, submission_id)
+    os.makedirs(submission_folder, exist_ok=True)
+    file_path = os.path.join(submission_folder, file.filename)
+    with open(file_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+    # Create submission record with initial progress saved to disk
+    submission = {
+        "id": submission_id,
+        "status": "pending",
+        "createdAt": datetime.utcnow().isoformat(),
+        "files": [file.filename],
+        "progress": "File uploaded, waiting for processing",
+    }
+    save_progress(submission_id, submission)
+    # Start background processing task
+    background_tasks.add_task(process_submission, submission_id, file_path)
+    return submission
+
+
+@app.get("/submissions")
+async def list_submissions():
+    # List all submissions by scanning PROGRESS_DIR
+    submissions = []
+    for fname in os.listdir(PROGRESS_DIR):
+        if fname.startswith("progress_") and fname.endswith(".json"):
+            submission_id = fname[len("progress_") : -len(".json")]
+            submissions.append(load_progress(submission_id))
+    return submissions
+
+
+@app.get("/submissions/{submission_id}")
+async def get_submission_status(submission_id: str = Path(...)):
+    progress = load_progress(submission_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return progress
+
+
+@app.post("/submissions/{submission_id}/files")
+async def upload_additional_files(
+    submission_id: str = Path(...),
+    background_tasks: BackgroundTasks = None,
+    files: List[UploadFile] = File(...),
+):
+    progress = load_progress(submission_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    submission_folder = os.path.join(UPLOAD_DIR, submission_id)
+    os.makedirs(submission_folder, exist_ok=True)
+    for file in files:
+        file_path = os.path.join(submission_folder, file.filename)
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        progress["files"].append(file.filename)
+        background_tasks.add_task(process_submission, submission_id, file_path)
+    progress["progress"] = "Additional files uploaded, processing started"
+    save_progress(submission_id, progress)
+    return progress
+
+
+# -----------------------------
+# WebSocket Endpoint for Live Status Updates
+# -----------------------------
+@app.websocket("/ws/{submission_id}")
+async def websocket_endpoint(websocket: WebSocket, submission_id: str):
+    await websocket.accept()
+    try:
+        while True:
+            progress = load_progress(submission_id)
+            await websocket.send_json(progress)
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        print(f"WebSocket disconnected for submission {submission_id}")
+
+
+# -----------------------------
+# Background Processing Function
+# -----------------------------
+def process_submission(submission_id: str, file_path: str):
+    """
+    Process an uploaded file:
+      - If compressed (zip), extract its contents.
+      - Search for Excel (.xlsx) or PDF (.pdf) files.
+      - For each, convert them to markdown.
+      - Save the generated markdown file to the processed folder.
+      - Move the original processed file to the analysis folder.
+      - Update persistent progress along the way.
+    """
+    progress = load_progress(submission_id)
+    progress["progress"] = "Processing started"
+    save_progress(submission_id, progress)
+
+    processing_subdir = os.path.join(PROCESSING_DIR, submission_id)
+    os.makedirs(processing_subdir, exist_ok=True)
+
+    extracted_files = []
+    if zipfile.is_zipfile(file_path):
+        progress["progress"] = "Extracting ZIP archive"
+        save_progress(submission_id, progress)
+        with zipfile.ZipFile(file_path, "r") as zip_ref:
+            zip_ref.extractall(processing_subdir)
+            extracted_files = [
+                os.path.join(processing_subdir, name) for name in zip_ref.namelist()
+            ]
+    else:
+        dest_path = os.path.join(processing_subdir, os.path.basename(file_path))
+        shutil.copy(file_path, dest_path)
+        extracted_files = [dest_path]
+
+    results = {}
+    for fpath in extracted_files:
+        ext = os.path.splitext(fpath)[1].lower()
+        result_md = ""
+        if ext == ".xlsx":
+            try:
+                with open(fpath, "rb") as f:
+                    file_bytes = f.read()
+                result_md = create_markdown_from_workbook_bytes(file_bytes)
+            except Exception as e:
+                result_md = f"Error processing Excel file: {str(e)}"
+        elif ext == ".pdf":
+            try:
+                with NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                    tmp.write(open(fpath, "rb").read())
+                    tmp.flush()
+                    tmp_filename = tmp.name
+                from marker.converters.pdf import PdfConverter
+                from marker.models import create_model_dict
+                from marker.output import text_from_rendered
+
+                converter = PdfConverter(artifact_dict=create_model_dict())
+                rendered = converter(tmp_filename)
+                text, _, images = text_from_rendered(rendered)
+                os.remove(tmp_filename)
+                result_md = text
+            except Exception as e:
+                result_md = f"Error processing PDF file: {str(e)}"
+        else:
+            continue
+        if result_md:
+            submission_processed_dir = os.path.join(PROCESSED_DIR, submission_id)
+            os.makedirs(submission_processed_dir, exist_ok=True)
+            base_name = os.path.splitext(os.path.basename(fpath))[0]
+            out_file = os.path.join(submission_processed_dir, f"{base_name}.md")
+            with open(out_file, "w", encoding="utf-8") as outf:
+                outf.write(result_md)
+            results[os.path.basename(fpath)] = out_file
+        progress["progress"] = f"Processed {os.path.basename(fpath)}"
+        save_progress(submission_id, progress)
+        time.sleep(1)
+
+    analysis_subdir = os.path.join(ANALYSIS_DIR, submission_id)
+    os.makedirs(analysis_subdir, exist_ok=True)
+    for f in extracted_files:
+        shutil.move(f, analysis_subdir)
+
+    progress["status"] = "complete"
+    progress["progress"] = "All files processed"
+    progress["results"] = results
+    progress["processedAt"] = datetime.utcnow().isoformat()
+    save_progress(submission_id, progress)
+
+
+# -----------------------------
+# Endpoints for File Operations
+# -----------------------------
+@app.get("/files/{submission_id}")
+async def get_submission_files(submission_id: str = Path(...)):
+    progress = load_progress(submission_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return {"files": progress.get("files", []), "results": progress.get("results", {})}
+
+
+@app.get("/files/{submission_id}/{file_name}/content")
+async def get_file_content(submission_id: str = Path(...), file_name: str = Path(...)):
+    # Look in the processed folder for a markdown file matching the base name.
+    submission_processed_dir = os.path.join(PROCESSED_DIR, submission_id)
+    base_name = os.path.splitext(file_name)[0]
+    md_file = os.path.join(submission_processed_dir, f"{base_name}.md")
+    if not os.path.exists(md_file):
+        raise HTTPException(status_code=404, detail="Processed file not found")
+    with open(md_file, "r", encoding="utf-8") as f:
+        content = f.read()
+    return {"text": content}
+
+
+@app.get("/files/{submission_id}/{file_name}/download")
+async def download_file(submission_id: str = Path(...), file_name: str = Path(...)):
+    # Try to locate the original file in the analysis folder first.
+    analysis_subdir = os.path.join(ANALYSIS_DIR, submission_id)
+    file_path = os.path.join(analysis_subdir, file_name)
+    if not os.path.exists(file_path):
+        # Fall back to looking in the upload folder.
+        upload_subdir = os.path.join(UPLOAD_DIR, submission_id)
+        file_path = os.path.join(upload_subdir, file_name)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(
+        file_path, media_type="application/octet-stream", filename=file_name
+    )
+
+
+@app.delete("/files/{submission_id}/{file_name}")
+async def delete_file(submission_id: str = Path(...), file_name: str = Path(...)):
+    # Remove file from analysis folder if exists.
+    analysis_subdir = os.path.join(ANALYSIS_DIR, submission_id)
+    file_path = os.path.join(analysis_subdir, file_name)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+    # Also remove from processed folder (if markdown exists)
+    submission_processed_dir = os.path.join(PROCESSED_DIR, submission_id)
+    base_name = os.path.splitext(file_name)[0]
+    md_file = os.path.join(submission_processed_dir, f"{base_name}.md")
+    if os.path.exists(md_file):
+        os.remove(md_file)
+    progress = load_progress(submission_id)
+    if progress and "files" in progress:
+        progress["files"] = [f for f in progress["files"] if f != file_name]
+        save_progress(submission_id, progress)
+    return {"success": True, "message": "File deleted successfully"}
+
+
+@app.post("/files/{submission_id}/compare-contracts")
+async def compare_contracts(submission_id: str = Path(...), payload: dict = None):
+    if not payload or "previousFile" not in payload or "currentFile" not in payload:
+        raise HTTPException(
+            status_code=400, detail="Payload must include previousFile and currentFile"
+        )
+    # Simulate contract comparison.
+    comparison = {
+        "clauses": [
+            {
+                "id": "clause-1",
+                "name": "Coverage Territory",
+                "previousText": "This policy covers properties located in Florida, excluding Monroe County.",
+                "currentText": "Now covers Florida excluding Monroe County and coastal areas within 5 miles.",
+                "significance": "high",
+                "changes": [
+                    {"type": "modification", "text": "Added coastal area exclusion."}
+                ],
+            }
+        ]
+    }
+    return comparison
+
+
+@app.post("/files/{submission_id}/analyze-claims")
+async def analyze_claims(submission_id: str = Path(...), payload: dict = None):
+    if not payload or "fileName" not in payload:
+        raise HTTPException(status_code=400, detail="Payload must include fileName")
+    analysis = {
+        "analysis": f"Simulated analysis of claims data from {payload['fileName']}."
+    }
+    return analysis
+
+
+@app.post("/files/{submission_id}/analyze-exposure")
+async def analyze_exposure(submission_id: str = Path(...), payload: dict = None):
+    if not payload or "fileName" not in payload:
+        raise HTTPException(status_code=400, detail="Payload must include fileName")
+    analysis = {
+        "analysis": f"Simulated analysis of exposure data from {payload['fileName']}."
+    }
+    return analysis
+
+
+@app.post("/files/{submission_id}/extract-insights")
+async def extract_insights(submission_id: str = Path(...), payload: dict = None):
+    if not payload or "fileNames" not in payload:
+        raise HTTPException(
+            status_code=400, detail="Payload must include a list of fileNames"
+        )
+    insights = {
+        "insights": f"Simulated insights extracted from files: {', '.join(payload['fileNames'])}."
+    }
+    return insights
+
+
+# -----------------------------
+# Dashboard Endpoint
+# -----------------------------
+@app.get("/dashboard/{submission_id}")
+async def get_dashboard_data(submission_id: str = Path(...)):
+    progress = load_progress(submission_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    # Simulated dashboard data combining progress and some dummy values.
+    dashboard = {
+        "contractRiskData": {"riskScore": 75},
+        "layerData": {"layerCount": 3},
+        "hurricaneData": {"peakWind": 120},
+        "claimsData": {"totalClaims": 5},
+        "exposureData": {"exposureValue": 1000000},
+        "economicData": {"lossEstimate": 250000},
+        "climateRiskData": {"climateIndex": 0.85},
+        "contractChanges": progress.get("results", {}),
+        "keyInsights": {"summary": "Processed successfully"},
+        "underwriterResponse": progress.get("underwriterResponse", {}),
+    }
+    return dashboard
+
+
+@app.post("/submissions/{submission_id}/response")
+async def submit_underwriter_response(
+    submission_id: str = Path(...), response_data: dict = None
+):
+    progress = load_progress(submission_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    progress["underwriterResponse"] = response_data or {}
+    save_progress(submission_id, progress)
+    return {"success": True, "message": "Underwriter response submitted successfully"}
+
+
+# -----------------------------
+# Main Execution
+# -----------------------------
 if __name__ == "__main__":
     import uvicorn
 
