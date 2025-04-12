@@ -8,11 +8,12 @@ from pathlib import Path
 
 app = FastAPI()
 
-NEWS_FOLDER = Path("../data/news")  # Path to the folder containing news articles. The originals are md so we can use them as is, no need to process them.
+NEWS_FOLDER = Path(r"data/aux_data_processed/news")  # Path to the folder containing news articles. The originals are md so we can use them as is, no need to process them.
 
 @app.get("/get-news-article-text", response_class=PlainTextResponse)
 def get_news_file(filename: str):
     file_path = NEWS_FOLDER / filename
+    #print(file_path)
 
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found.")
@@ -27,6 +28,7 @@ def get_news_file(filename: str):
 
 
 # Example usage, will only be run if this script is executed directly (not when imported)
+# Run it from the the same working directory as the backend will call it from (i.e. /backend)
 if __name__ == "__main__":
     text = get_news_file("article_653771_2022_02_11.md")  # First article in the news folder
     print(text)
