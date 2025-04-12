@@ -1,4 +1,5 @@
 fastapi
 openpyxl
-marker
-marker-pdf
+marker-pdf==1.2.5
+python-multipart
+uvicorn
