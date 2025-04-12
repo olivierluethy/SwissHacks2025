@@ -10,7 +10,7 @@ app = FastAPI()
 
 NEWS_FOLDER = Path("../data/news")  # Path to the folder containing news articles. The originals are md so we can use them as is, no need to process them.
 
-@app.get("/get-news", response_class=PlainTextResponse)
+@app.get("/get-news-article-text", response_class=PlainTextResponse)
 def get_news_file(filename: str):
     file_path = NEWS_FOLDER / filename
 
