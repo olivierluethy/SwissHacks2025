@@ -1,0 +1,596 @@
+import io
+import os
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi.responses import Response
+from html import escape
+from collections import deque
+from openpyxl import load_workbook
+from tempfile import NamedTemporaryFile
+
+# Existing Excel processing code begins here ...
+
+DEFAULT_FILL_COLORS = {None, "00000000", "FFFFFFFF"}
+
+
+def get_cell_info(cell):
+    """
+    Return a dictionary with the cell's value and its fill color (RGB string if available).
+    """
+    val = cell.value
+    color = None
+    if cell.fill and cell.fill.fill_type:
+        color = cell.fill.start_color.rgb
+    return {"value": val, "color": color}
+
+
+def apply_merged_cells(ws, matrix):
+    """
+    Propagate values and colors from the top-left cell of merged areas.
+    Also return a dictionary mapping cell coordinates to merged cell information.
+    """
+    merged_cell_map = {}  # Maps (row, col) to merged range bounds
+
+    for merged_range in ws.merged_cells.ranges:
+        min_col, min_row, max_col, max_row = merged_range.bounds
+        base_cell = matrix[min_row - 1][min_col - 1]
+
+        # Store the merged range information
+        merged_cell_map[(min_row - 1, min_col - 1)] = {
+            "min_row": min_row - 1,
+            "min_col": min_col - 1,
+            "max_row": max_row - 1,
+            "max_col": max_col - 1,
+            "rowspan": max_row - min_row + 1,
+            "colspan": max_col - min_col + 1,
+        }
+
+        # Propagate values to all cells in the merged range
+        for r in range(min_row - 1, max_row):
+            for c in range(min_col - 1, max_col):
+                if (r, c) != (min_row - 1, min_col - 1):
+                    matrix[r][c]["value"] = base_cell["value"]
+                    matrix[r][c]["color"] = base_cell["color"]
+                    # Mark other cells in the merged range
+                    matrix[r][c]["merged_into"] = (min_row - 1, min_col - 1)
+
+    return merged_cell_map
+
+
+def get_sheet_matrix(ws):
+    """
+    Read the worksheet into a 2D matrix of dictionaries.
+    """
+    max_row = ws.max_row
+    max_col = ws.max_column
+    matrix = []
+    for r in range(1, max_row + 1):
+        row_vals = []
+        for c in range(1, max_col + 1):
+            cell_info = get_cell_info(ws.cell(row=r, column=c))
+            cell_info["merged_into"] = (
+                None  # Will be set in apply_merged_cells if applicable
+            )
+            row_vals.append(cell_info)
+        matrix.append(row_vals)
+
+    merged_cell_map = apply_merged_cells(ws, matrix)
+    return matrix, merged_cell_map
+
+
+def is_nonempty(cell_info):
+    """
+    Return True if the cell is nonempty.
+    """
+    val = cell_info["value"]
+    return val is not None and str(val).strip() != ""
+
+
+def is_header_cell(cell_info):
+    """
+    A cell qualifies as a header if its fill color is not a default color.
+    """
+    color = cell_info["color"]
+    return color not in DEFAULT_FILL_COLORS
+
+
+def is_title_candidate(matrix, r, c, merged_cell_map):
+    """
+    Check if a cell is likely to be a title based on:
+    1. It's a merged cell that spans multiple columns
+    2. It's positioned at the top of a data region
+    3. It has content
+    """
+    cell_key = (r, c)
+    if cell_key in merged_cell_map:
+        merged_info = merged_cell_map[cell_key]
+        if merged_info["colspan"] > 1 and is_nonempty(matrix[r][c]):
+            return True
+
+    if is_nonempty(matrix[r][c]) and is_header_cell(matrix[r][c]):
+        return True
+
+    return False
+
+
+def smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1):
+    """
+    Use BFS to detect connected components of nonempty cells.
+    Allows for small gaps to connect nearby cells.
+    """
+    nrows = len(matrix)
+    ncols = len(matrix[0]) if nrows else 0
+    visited = [[False] * ncols for _ in range(nrows)]
+    components = []
+
+    # Identify potential title cells
+    title_cells = set()
+    for r in range(nrows):
+        for c in range(ncols):
+            if is_title_candidate(matrix, r, c, merged_cell_map):
+                title_cells.add((r, c))
+                if (r, c) in merged_cell_map:
+                    merged_info = merged_cell_map[(r, c)]
+                    for mr in range(merged_info["min_row"], merged_info["max_row"] + 1):
+                        for mc in range(
+                            merged_info["min_col"], merged_info["max_col"] + 1
+                        ):
+                            title_cells.add((mr, mc))
+
+    # Process cells in order
+    for r in range(nrows):
+        for c in range(ncols):
+            if visited[r][c] or not is_nonempty(matrix[r][c]):
+                continue
+
+
+            q = deque()
+            q.append((r, c))
+            visited[r][c] = True
+            component_cells = {(r, c)}
+            min_r, max_r = r, r
+            min_c, max_c = c, c
+            has_title = (r, c) in title_cells
+
+            while q:
+                cr, cc = q.popleft()
+                min_r = min(min_r, cr)
+                max_r = max(max_r, cr)
+                min_c = min(min_c, cc)
+                max_c = max(max_c, cc)
+
+                for dr in range(-max_v_gap, max_v_gap + 1):
+                    for dc in range(-max_h_gap, max_h_gap + 1):
+                        if dr == 0 and dc == 0:
+                            continue
+                        nr, nc = cr + dr, cc + dc
+                        if 0 <= nr < nrows and 0 <= nc < ncols:
+                            if not visited[nr][nc] and is_nonempty(matrix[nr][nc]):
+                                if abs(dr) > 1 or abs(dc) > 1:
+                                    if not is_reasonable_gap(matrix, cr, cc, nr, nc):
+                                        continue
+                                visited[nr][nc] = True
+                                q.append((nr, nc))
+                                component_cells.add((nr, nc))
+                                if (nr, nc) in title_cells:
+                                    has_title = True
+
+            # Look for potential titles above the component if none found yet.
+            title_row = None
+            if not has_title:
+                for tr in range(max(0, min_r - 3), min_r):
+                    for tc in range(min_c, max_c + 1):
+                        if is_title_candidate(matrix, tr, tc, merged_cell_map):
+                            title_row = tr
+                            for ttc in range(min_c, max_c + 1):
+                                if not visited[tr][ttc]:
+                                    visited[tr][ttc] = True
+                                    component_cells.add((tr, ttc))
+                            break
+                    if title_row is not None:
+                        break
+                if title_row is not None:
+                    min_r = min(min_r, title_row)
+
+            # Look for footers below the component
+            for fr in range(max_r + 1, min(nrows, max_r + max_v_gap + 1)):
+                footer_found = False
+                for fc in range(min_c, max_c + 1):
+                    if is_nonempty(matrix[fr][fc]):
+                        footer_found = True
+                        for ffc in range(min_c, max_c + 1):
+                            if not visited[fr][ffc]:
+                                visited[fr][ffc] = True
+                                component_cells.add((fr, ffc))
+                        max_r = fr
+                        break
+                if not footer_found:
+                    break
+
+            # Expand merged region cells into the component
+            expanded_cells = set()
+            for cell in component_cells:
+                r_cell, c_cell = cell
+                if matrix[r_cell][c_cell]["merged_into"] is not None:
+                    main_r, main_c = matrix[r_cell][c_cell]["merged_into"]
+                    expanded_cells.add((main_r, main_c))
+                else:
+                    expanded_cells.add(cell)
+                    if (r_cell, c_cell) in merged_cell_map:
+                        merged_info = merged_cell_map[(r_cell, c_cell)]
+                        for mr in range(
+                            merged_info["min_row"], merged_info["max_row"] + 1
+                        ):
+                            for mc in range(
+                                merged_info["min_col"], merged_info["max_col"] + 1
+                            ):
+                                expanded_cells.add((mr, mc))
+                                visited[mr][mc] = True
+
+            if expanded_cells:
+                min_r = min(r for r, _ in expanded_cells)
+                max_r = max(r for r, _ in expanded_cells)
+                min_c = min(c for _, c in expanded_cells)
+                max_c = max(c for _, c in expanded_cells)
+
+            components.append(
+                {
+                    "bounds": (min_r, max_r, min_c, max_c),
+                    "cells": expanded_cells,
+                }
+            )
+
+    components.sort(key=lambda comp: len(comp["cells"]), reverse=True)
+
+    final_components = []
+    used_cells = set()
+    for comp in components:
+        if not comp["cells"].intersection(used_cells):
+            final_components.append(comp["bounds"])
+            used_cells.update(comp["cells"])
+
+    final_components.sort(key=lambda b: (b[0], b[2]))
+    return final_components
+
+
+def is_reasonable_gap(matrix, r1, c1, r2, c2):
+    """
+    Determine if a gap between cells is reasonable based on cell alignment and content.
+    """
+    if r1 == r2 or c1 == c2:
+        return True
+
+    if abs(r2 - r1) == 2 and c1 == c2:
+        middle_r = (r1 + r2) // 2
+        return not is_nonempty(matrix[middle_r][c1])
+
+    if abs(c2 - c1) == 2 and r1 == r2:
+        middle_c = (c1 + c2) // 2
+        return not is_nonempty(matrix[r1][middle_c])
+
+    if abs(r2 - r1) <= 2 and abs(c2 - c1) <= 2:
+        return True
+
+    return False
+
+
+def extract_title(matrix, bounds, merged_cell_map):
+    """
+    Extract a meaningful title from the table bounds, accounting for merged cells.
+    """
+    top, bottom, left, right = bounds
+
+    for r in range(max(0, top - 2), top + 2):
+        if r >= len(matrix):
+            continue
+        for c in range(left, right + 1):
+            if c >= len(matrix[0]):
+                continue
+
+            cell_key = (r, c)
+            if cell_key in merged_cell_map:
+                merged_info = merged_cell_map[cell_key]
+                span_ratio = (merged_info["max_col"] - merged_info["min_col"] + 1) / (
+                    right - left + 1
+                )
+                if span_ratio >= 0.5 and is_nonempty(matrix[r][c]):
+                    return str(matrix[r][c]["value"]).strip(), r < top
+
+    for r in range(max(0, top - 2), top + 2):
+        if r >= len(matrix):
+            continue
+        non_empty_cells = []
+        for c in range(left, right + 1):
+            if c >= len(matrix[0]):
+                continue
+            if is_nonempty(matrix[r][c]):
+                non_empty_cells.append((r, c))
+
+        if len(non_empty_cells) == 1:
+            r_idx, c_idx = non_empty_cells[0]
+            return str(matrix[r_idx][c_idx]["value"]).strip(), r_idx < top
+
+    title_parts = []
+    for c in range(left, right + 1):
+        if c >= len(matrix[0]):
+            continue
+
+        if is_nonempty(matrix[top][c]) and matrix[top][c]["merged_into"] is None:
+            title_parts.append(str(matrix[top][c]["value"]).strip())
+
+    if title_parts:
+        return " ".join(title_parts), False
+
+    return "Untitled Table", False
+
+
+def dataframe_to_html(matrix, bounds, merged_cell_map):
+    """
+    Convert a submatrix to an HTML table with merged cell support.
+    """
+    top, bottom, left, right = bounds
+    html_lines = []
+    html_lines.append("<table>")
+    for r in range(top, bottom + 1):
+        if r >= len(matrix):
+            continue
+        row_html = ["<tr>"]
+        for c in range(left, right + 1):
+            if c >= len(matrix[0]):
+                continue
+            if matrix[r][c]["merged_into"] is not None:
+                merged_r, merged_c = matrix[r][c]["merged_into"]
+                if merged_r != r or merged_c != c:
+                    continue
+            cell = matrix[r][c]
+            attrs = ""
+            if (r, c) in merged_cell_map:
+                merged_info = merged_cell_map[(r, c)]
+                rowspan = merged_info["rowspan"]
+                colspan = merged_info["colspan"]
+                effective_rowspan = min(rowspan, bottom - r + 1)
+                effective_colspan = min(colspan, right - c + 1)
+                if effective_rowspan > 1:
+                    attrs += f' rowspan="{effective_rowspan}"'
+                if effective_colspan > 1:
+                    attrs += f' colspan="{effective_colspan}"'
+            cell_content = escape(str(cell["value"])) if is_nonempty(cell) else ""
+            row_html.append(f"<td{attrs}>{cell_content}</td>")
+        row_html.append("</tr>")
+        html_lines.append("".join(row_html))
+    html_lines.append("</table>")
+    return "\n".join(html_lines)
+
+
+def dataframe_to_markdown(matrix, bounds, merged_cell_map):
+    """
+    Convert a submatrix to a Markdown table.
+    """
+    top, bottom, left, right = bounds
+    table_grid = []
+    for r in range(top, bottom + 1):
+        if r >= len(matrix):
+            continue
+        row = []
+        for c in range(left, right + 1):
+            if c >= len(matrix[0]):
+                continue
+            if matrix[r][c]["merged_into"] is not None:
+                merged_r, merged_c = matrix[r][c]["merged_into"]
+                if merged_r != r or merged_c != c:
+                    row.append("")
+                    continue
+            cell = matrix[r][c]
+            cell_content = (
+                str(cell["value"]).strip().replace("|", "\\|")
+                if is_nonempty(cell)
+                else ""
+            )
+            row.append(cell_content)
+        table_grid.append(row)
+
+    if not table_grid:
+        return "*Empty table*"
+
+    col_widths = [0] * len(table_grid[0])
+    for row in table_grid:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(cell))
+
+    md_lines = []
+    header = (
+        "| "
+        + " | ".join(cell.ljust(col_widths[i]) for i, cell in enumerate(table_grid[0]))
+        + " |"
+    )
+    md_lines.append(header)
+    separator = "| " + " | ".join("-" * max(3, width) for width in col_widths) + " |"
+    md_lines.append(separator)
+    for row_idx, row in enumerate(table_grid):
+        if row_idx == 0:
+            continue
+        md_row = (
+            "| "
+            + " | ".join(cell.ljust(col_widths[i]) for i, cell in enumerate(row))
+            + " |"
+        )
+        md_lines.append(md_row)
+    return "\n".join(md_lines)
+
+
+def process_sheet_html(ws):
+    """
+    Process an Excel worksheet to extract subtables as HTML.
+    """
+    matrix, merged_cell_map = get_sheet_matrix(ws)
+    if not matrix:
+        return "<p>No data found in this sheet.</p>"
+
+    blocks = smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1)
+    html_fragments = []
+    for bounds in blocks:
+        top, bottom, left, right = bounds
+        title, is_external_title = extract_title(matrix, bounds, merged_cell_map)
+        html_fragments.append(f"<h3>{escape(title)}</h3>")
+        table_top = (
+            top + 1 if not is_external_title and title != "Untitled Table" else top
+        )
+        if table_top <= bottom:
+            table_html = dataframe_to_html(
+                matrix, (table_top, bottom, left, right), merged_cell_map
+            )
+            html_fragments.append(table_html)
+        html_fragments.append("<hr>")
+    return "\n".join(html_fragments)
+
+
+def process_sheet_markdown(ws):
+    """
+    Process an Excel worksheet to extract subtables as Markdown.
+    """
+    matrix, merged_cell_map = get_sheet_matrix(ws)
+    if not matrix:
+        return "*No data found in this sheet.*"
+
+    blocks = smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1)
+    md_fragments = []
+    for bounds in blocks:
+        top, bottom, left, right = bounds
+        title, is_external_title = extract_title(matrix, bounds, merged_cell_map)
+        md_fragments.append(f"### {title}")
+        md_fragments.append("")
+        table_top = (
+            top + 1 if not is_external_title and title != "Untitled Table" else top
+        )
+        if table_top <= bottom:
+            table_md = dataframe_to_markdown(
+                matrix, (table_top, bottom, left, right), merged_cell_map
+            )
+            md_fragments.append(table_md)
+            md_fragments.append("")
+        md_fragments.append("---")
+        md_fragments.append("")
+    return "\n".join(md_fragments)
+
+
+def create_html_from_workbook_bytes(file_bytes: bytes) -> str:
+    """
+    Process each Excel sheet in the workbook (provided as bytes) to extract subtables as HTML.
+    """
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error loading workbook: {e}")
+
+    html_lines = [
+        "<!DOCTYPE html>",
+        "<html>",
+        "<head>",
+        '    <meta charset="UTF-8">',
+        "    <title>Extracted Excel Subtables</title>",
+        "</head>",
+        "<body>",
+        "<h1>Extracted Subtables</h1>",
+    ]
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        html_lines.append("<section>")
+        html_lines.append(f"<h2>Sheet: {escape(sheet_name)}</h2>")
+        sheet_html = process_sheet_html(ws)
+        html_lines.append(sheet_html)
+        html_lines.append("</section>")
+    html_lines.append("</body>")
+    html_lines.append("</html>")
+    return "\n".join(html_lines)
+
+
+def create_markdown_from_workbook_bytes(file_bytes: bytes) -> str:
+    """
+    Process each Excel sheet in the workbook (provided as bytes) to extract subtables as Markdown.
+    """
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error loading workbook: {e}")
+
+    md_lines = ["# Extracted Excel Subtables", ""]
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        md_lines.append(f"## Sheet: {sheet_name}")
+        md_lines.append("")
+        sheet_md = process_sheet_markdown(ws)
+        md_lines.append(sheet_md)
+        md_lines.append("")
+    return "\n".join(md_lines)
+
+
+# New imports for PDF processing
+from marker.converters.pdf import PdfConverter
+from marker.models import create_model_dict
+from marker.output import text_from_rendered
+
+app = FastAPI(title="Excel & PDF Subtable Extractor")
+
+
+@app.post("/extract")
+async def extract_subtables(
+    file: UploadFile = File(...),
+    output_format: str = Query(
+        "html",
+        regex="^(html|md)$",
+        description="Output format for Excel: 'html' or 'md'",
+    ),
+):
+    """
+    Accepts an XLSX or PDF file upload and returns the extracted content:
+    - For Excel (.xlsx): extracts subtables in HTML or Markdown.
+    - For PDF (.pdf): parses the file via PdfConverter and returns markdown (or plain text if html is requested).
+    """
+    filename = file.filename.lower()
+    try:
+        file_bytes = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading the file: {e}")
+
+    if filename.endswith(".xlsx"):
+        if output_format.lower() == "md":
+            result = create_markdown_from_workbook_bytes(file_bytes)
+            media_type = "text/markdown"
+        else:
+            result = create_html_from_workbook_bytes(file_bytes)
+            media_type = "text/html"
+    elif filename.endswith(".pdf"):
+        # Write the PDF to a temporary file because PdfConverter needs a file path.
+        try:
+            with NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(file_bytes)
+                tmp.flush()
+                tmp_filename = tmp.name
+            converter = PdfConverter(artifact_dict=create_model_dict())
+            rendered = converter(tmp_filename)
+            text, _, images = text_from_rendered(rendered)
+            # Cleanup the temporary file
+            os.remove(tmp_filename)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Error processing PDF: {e}")
+
+        # For PDF, we use the markdown output as default.
+        if output_format.lower() == "md":
+            result = text
+            media_type = "text/markdown"
+        else:
+            # If HTML is requested, you might later convert markdown to HTML.
+            result = text
+            media_type = "text/html"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Only .xlsx and .pdf files are supported.",
+        )
+
+    return Response(content=result, media_type=media_type)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app)
