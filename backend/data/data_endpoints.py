@@ -86,28 +86,11 @@ async def get_file_contents(filename: str):
 
 
 
-
-# # Combines the two endpoints above to return the contents of the top K related files
-# @router.post("/top_k_related_files_contents", response_model=List[RelatedFile])
-# def get_top_k_related_files_contents(request: InputTextRequest):
-#     # Get the top K related files
-#     related_files = get_top_k_related_files(request)
-
-#     # Get the contents of each related file
-#     for related_file in related_files:
-#         filename = related_file.filename
-#         try:
-#             with open(BASE_FOLDER / filename, "r", encoding="utf-8") as f:
-#                 content = f.read()
-#             related_file.content = content
-#         except Exception as e:
-#             raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
-
-#     return related_files
-
-
-@router.post("/get_combined_file_contents", response_class=PlainTextResponse)
-async def get_combined_file_contents(request: InputTextRequest):
+# Combines both previous endpoints: given a text input, return the concatenated contents of the top K most
+# semantically similar files. The resulting string includes a header with the filename of each file used,
+# and also linebreaks between the contents of each file.
+@router.post("/top_k_related_files_contents", response_class=PlainTextResponse)
+async def get_top_k_related_files_contents(request: InputTextRequest):
     input_text = request.input_text
     k = request.k
 

@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import re
 from openai import OpenAI
-
+from data import data_endpoints
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 from pydantic import BaseModel
 
