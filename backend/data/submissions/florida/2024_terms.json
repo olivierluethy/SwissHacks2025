@@ -1,0 +1,87 @@
+{
+  "tax": null,
+  "layers": [
+    {
+      "name": "First Excess",
+      "flatPremium": null,
+      "layerNumber": "L1",
+      "aggregateLimit": 30000000,
+      "depositPremium": 15937500,
+      "minimumPremium": 14343750,
+      "occurrenceLimit": 15000000,
+      "aggregateAttachment": 25000000,
+      "occurrenceAttachment": 25000000
+    },
+    {
+      "name": "Second Excess",
+      "flatPremium": null,
+      "layerNumber": "L2",
+      "aggregateLimit": 160000000,
+      "depositPremium": 61200000,
+      "minimumPremium": 55080000,
+      "occurrenceLimit": 80000000,
+      "aggregateAttachment": 40000000,
+      "occurrenceAttachment": 40000000
+    },
+    {
+      "name": "Third Excess",
+      "flatPremium": null,
+      "layerNumber": "L3",
+      "aggregateLimit": 290000000,
+      "depositPremium": 69020000,
+      "minimumPremium": 62118000,
+      "occurrenceLimit": 145000000,
+      "aggregateAttachment": 120000000,
+      "occurrenceAttachment": 120000000
+    },
+    {
+      "name": "Fourth Excess",
+      "flatPremium": null,
+      "layerNumber": "L4",
+      "aggregateLimit": 240000000,
+      "depositPremium": 38760000,
+      "minimumPremium": 34884000,
+      "occurrenceLimit": 120000000,
+      "aggregateAttachment": 265000000,
+      "occurrenceAttachment": 265000000
+    },
+    {
+      "name": "Fifth Excess",
+      "flatPremium": null,
+      "layerNumber": "L5",
+      "aggregateLimit": 370000000,
+      "depositPremium": 40885000,
+      "minimumPremium": 36796500,
+      "occurrenceLimit": 185000000,
+      "aggregateAttachment": 385000000,
+      "occurrenceAttachment": 385000000
+    },
+    {
+      "name": "Sixth Excess",
+      "flatPremium": null,
+      "layerNumber": "L6",
+      "aggregateLimit": 300000000,
+      "depositPremium": 29325000,
+      "minimumPremium": 26392500,
+      "occurrenceLimit": 300000000,
+      "aggregateAttachment": 570000000,
+      "occurrenceAttachment": 570000000
+    }
+  ],
+  "perils": ["hurricane", "earthquake", "windstorm", "flood", "fire"],
+  "regions": [
+    {
+      "state": null,
+      "country": "US"
+    }
+  ],
+  "brokerage": null,
+  "brokerName": "Broker ABC",
+  "cedantName": "Cedant XYZ",
+  "contractType": "Occurrence",
+  "currencyCode": "USD",
+  "inceptionDate": "2024-06-01",
+  "expirationDate": "2025-05-31",
+  "uniqueMarketReference": "24\\X",
+  "expiringUniqueMarketReference": null
+}
