@@ -14,16 +14,16 @@ _Commercial Residential_ |  124  |  6  |  38  |  49  |  31  |  64.5%
 
 
 *Other Lines of Business may include Fire, Farmowners
-                                                            ’Multi-Peril, Ocean Marine, Inland Marine, Private
-                                                            Passenger Automobile Physical Damage, Commercial Auto
-                                                            Physical Damage, Aircraft, Glass, Boiler and Machinery,
-                                                            Industrial Fire, Industrial Extended Coverage, and
-                                                            Multi-Peril Crop.
+’Multi-Peril, Ocean Marine, Inland Marine, Private
+Passenger Automobile Physical Damage, Commercial Auto
+Physical Damage, Aircraft, Glass, Boiler and Machinery,
+Industrial Fire, Industrial Extended Coverage, and
+Multi-Peril Crop.
 
 
 *Other Lines of Business may include Fire, Farmowners
-                                                            ’Multi-Peril, Ocean Marine, Inland Marine, Private
-                                                            Passenger Automobile Physical Damage, Commercial Auto
-                                                            Physical Damage, Aircraft, Glass, Boiler and Machinery,
-                                                            Industrial Fire, Industrial Extended Coverage, and
-                                                            Multi-Peril Crop.
+’Multi-Peril, Ocean Marine, Inland Marine, Private
+Passenger Automobile Physical Damage, Commercial Auto
+Physical Damage, Aircraft, Glass, Boiler and Machinery,
+Industrial Fire, Industrial Extended Coverage, and
+Multi-Peril Crop.

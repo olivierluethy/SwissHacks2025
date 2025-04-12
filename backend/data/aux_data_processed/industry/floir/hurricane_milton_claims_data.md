@@ -15,59 +15,48 @@ _Commercial Residential_ |  3,332  |  214  |  853  |  1,729  |  986  |  68%  |  
 
 
 
-                                                        OIR captures data in its efforts to evaluate catastrophe claims
-                                                        and compels all insurers to report data as of each required
-                                                        reporting date, per section 624.307, Florida Statutes. This
-                                                        aggregate information is compiled from claims data filed by
-                                                        insurers. It has not been audited or independently verified.
-                                                        Companies will be required to begin submitting data
-                                                        October 10, 2024
-                                                         and the data covers all claims based on filings received
-                                                        by OIR to date. Additional data calls may be conducted.
+OIR captures data in its efforts to evaluate catastrophe claims
+and compels all insurers to report data as of each required
+reporting date, per section 624.307, Florida Statutes. This
+aggregate information is compiled from claims data filed by
+insurers. It has not been audited or independently verified.
+Companies will be required to begin submitting data
+October 10, 2024
+and the data covers all claims based on filings received
+by OIR to date. Additional data calls may be conducted.
+
+
+OIR encourages consumers who are having issues with a claim to
+report it. Click here to report an issue with a claim.
                                                     
 
-                                                        OIR encourages consumers who are having issues with a claim to
-                                                        report it. Click here
-                                                        to report an issue with a claim.
-                                                    
-
-Total Estimated Insured Losses
-                                                            :
-$
-4,023,823,854
+Total Estimated Insured Losses:
+$4,023,823,854
 
 
 
 OIR
-                                                                required insurers report estimated and paid losses.
-                                                                Estimated or case incurred losses include indemnity case
-                                                                reserves and payments to date.
-
+required insurers report estimated and paid losses.
+Estimated or case incurred losses include indemnity case
+reserves and payments to date.
 26,290
 
-
-                                                                Data as of Feb. 11, 2025
-
-
-
-
-
+Data as of Feb. 11, 2025
 
 *Other Lines of Business may include Fire, Farmowners
-                                                                ’Multi-Peril, Ocean Marine, Inland Marine,
-                                                                Aircraft, Glass, Boiler and Machinery, Industrial Fire,
-                                                                Industrial Extended Coverage, and Multi-Peril Crop.
-
+’Multi-Peril, Ocean Marine, Inland Marine,
+Aircraft, Glass, Boiler and Machinery, Industrial Fire,
+Industrial Extended Coverage, and Multi-Peril Crop.
 
 ** A closed claim without payment is a claim deemed
-                                                                not currently payable by the reporting insurer. The most
-                                                                common reasons for a closed claim without payment is not
-                                                                meeting the deductible, or being a claim for flood
-                                                                damage which is not generally covered under a homeowner
-                                                                ’s insurance policy. Other reasons include, but
-                                                                are not limited to, the consumer withdrawing the claim
-                                                                or the insured not being reachable to adjudicate the
-                                                                claim. The OIR audits and examines insurer claims
-                                                                payments following every catastrophe to ensure claims
-                                                                are properly handled in compliance with Florida law and
-                                                                the terms of the policy.
+not currently payable by the reporting insurer. The most
+common reasons for a closed claim without payment is not
+meeting the deductible, or being a claim for flood
+damage which is not generally covered under a homeowner
+’s insurance policy. Other reasons include, but
+are not limited to, the consumer withdrawing the claim
+or the insured not being reachable to adjudicate the
+claim. The OIR audits and examines insurer claims
+payments following every catastrophe to ensure claims
+are properly handled in compliance with Florida law and
+the terms of the policy.
