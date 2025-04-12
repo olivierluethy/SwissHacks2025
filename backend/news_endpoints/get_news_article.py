@@ -8,7 +8,7 @@ from pathlib import Path
 
 app = FastAPI()
 
-NEWS_FOLDER = Path("../data/raw/news")  # Path to the folder containing news articles. The originals are md so we can use them as is, no need to process them.
+NEWS_FOLDER = Path("../data/news")  # Path to the folder containing news articles. The originals are md so we can use them as is, no need to process them.
 
 @app.get("/get-news", response_class=PlainTextResponse)
 def get_news_file(filename: str):
