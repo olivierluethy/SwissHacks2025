@@ -14,6 +14,13 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import re
+import ollama
+from pydantic import BaseModel
+
+MODEL_NAME = "llama3.1"  # Ensure this exactly matches the model name
+
+app = FastAPI()
 
 
 # -----------------------------
@@ -177,6 +184,274 @@ async def delete_file(submission_id: str = Path(...), file_name: str = Path(...)
     return {"success": True, "message": "File deleted successfully"}
 
 
+class AnalysisRequest(BaseModel):
+    folder_name: str
+
+
+def read_all_files_from_folder(folder_name: str) -> str:
+    """
+    Reads all files (ignoring subfolders) in the provided folder and concatenates
+    their contents into a single markdown string.
+    """
+    if not os.path.exists(folder_name):
+        raise FileNotFoundError(f"Folder '{folder_name}' does not exist.")
+    if not os.path.isdir(folder_name):
+        raise NotADirectoryError(f"'{folder_name}' is not a directory.")
+
+    combined_text = ""
+    for file_name in os.listdir(folder_name):
+        file_path = os.path.join(folder_name, file_name)
+        if os.path.isfile(file_path):
+            try:
+                with open(file_path, encoding="utf8") as f:
+                    file_contents = f.read()
+                    combined_text += file_contents + "\n\n"
+            except Exception as e:
+                raise Exception(f"Error reading file {file_path}: {e}")
+    return combined_text.strip()
+
+
+def query_ai(prompt: str, model_name: str = MODEL_NAME) -> str:
+    """
+    Sends the provided prompt to the AI model and returns the cleaned JSON response.
+    Removes any <think> sections that the model might include.
+    """
+    try:
+        response = ollama.chat(
+            model=model_name, messages=[{"role": "user", "content": prompt}]
+        )
+        content = response["message"]["content"]
+        # Remove any embedded <think> sections if present.
+        cleaned_content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
+        return cleaned_content.strip()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error querying the AI: {e}")
+
+
+def generate_overview(markdown_text: str) -> str:
+    """
+    Queries the AI for the overview part of the JSON.
+    The resulting JSON should only contain the "title" and "markdown" fields.
+    """
+    prompt = f"""
+Generate your result following the JSON schema as defined below.
+You must output ONLY valid JSON and nothing else.
+You are only providing the overview: a 'title' and a Markdown 'summary'.
+
+JSON Schema for this part:
+{{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AI Overview Schema",
+  "type": "object",
+  "required": ["title", "markdown"],
+  "properties": {{
+    "title": {{
+      "type": "string",
+      "description": "The main title of the analysis report"
+    }},
+    "markdown": {{
+      "type": "string",
+      "description": "Markdown-formatted summary of the analysis"
+    }}
+  }}
+}}
+
+Markdown input to analyze:
+{markdown_text}
+
+Ensure that you output only JSON following the schema.
+"""
+    return query_ai(prompt)
+
+
+def generate_key_insights(markdown_text: str) -> str:
+    """
+    Queries the AI to generate the 'keyInsights' array.
+    Each insight contains title, description, impact and confidence.
+    """
+    prompt = f"""
+Generate your result following the JSON schema as defined below.
+You must output ONLY valid JSON and nothing else.
+You are only providing the keyInsights array.
+
+JSON Schema for keyInsights:
+{{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Key Insights Schema",
+  "type": "array",
+  "description": "A list of important insights derived from the data analysis",
+  "items": {{
+    "type": "object",
+    "required": ["title", "description", "impact", "confidence"],
+    "properties": {{
+      "title": {{
+        "type": "string",
+        "description": "Short title or headline summarizing the insight"
+      }},
+      "description": {{
+        "type": "string",
+        "description": "Detailed explanation of the insight"
+      }},
+      "impact": {{
+        "type": "string",
+        "enum": ["positive", "negative"],
+        "description": "Indicates whether the insight has a positive or negative effect on risk or performance"
+      }},
+      "confidence": {{
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Confidence score between 0 and 1 indicating the reliability of the insight"
+      }}
+    }}
+  }}
+}}
+
+Markdown input to analyze:
+{markdown_text}
+
+Return only a JSON array that strictly adheres to the schema.
+"""
+    return query_ai(prompt)
+
+
+def generate_tabs(markdown_text: str) -> str:
+    """
+    Queries the AI to generate the 'tabs' array.
+    Each tab includes an id, a title, and content (either a JSON chart or an HTML string).
+    """
+    prompt = f"""
+Generate your result following the JSON schema as defined below.
+You must output ONLY valid JSON and nothing else.
+You are only providing the tabs array.
+
+JSON Schema for tabs:
+{{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tabs Schema",
+  "type": "array",
+  "description": "Different sections of the report, each representing a major analytical focus area",
+  "items": {{
+    "type": "object",
+    "required": ["id", "title", "content"],
+    "properties": {{
+      "id": {{
+        "type": "string",
+        "description": "Unique identifier for the tab"
+      }},
+      "title": {{
+        "type": "string",
+        "description": "Title of the tab shown in the UI"
+      }},
+      "content": {{
+        "type": "object",
+        "required": ["type", "data"],
+        "properties": {{
+          "type": {{
+            "type": "string",
+            "enum": ["json", "html"],
+            "description": "The format of the content: either a JSON chart or an HTML table/summary"
+          }},
+          "data": {{
+            "description": "Chart or HTML content depending on the specified type",
+            "oneOf": [
+              {{
+                "type": "object",
+                "required": ["chartType", "title", "description", "data"],
+                "properties": {{
+                  "chartType": {{
+                    "type": "string",
+                    "enum": ["bar", "line", "pie"]
+                  }},
+                  "title": {{
+                    "type": "string"
+                  }},
+                  "description": {{
+                    "type": "string"
+                  }},
+                  "xAxisLabel": {{
+                    "type": "string"
+                  }},
+                  "yAxisLabel": {{
+                    "type": "string"
+                  }},
+                  "data": {{
+                    "type": "array",
+                    "items": {{
+                      "type": "object",
+                      "properties": {{
+                        "value": {{
+                          "type": "number",
+                          "description": "Numerical value of the data point"
+                        }}
+                      }},
+                      "required": ["value"],
+                      "minProperties": 2
+                    }}
+                  }}
+                }}
+              }},
+              {{
+                "type": "string",
+                "description": "HTML string containing formatted report content or tables"
+              }}
+            ]
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+
+Markdown input to analyze:
+{markdown_text}
+
+Return only a JSON array that strictly adheres to the schema.
+"""
+    return query_ai(prompt)
+
+
+@app.post("/analyze")
+async def analyze(request: AnalysisRequest):
+    # Read all files from the provided folder and combine their contents.
+    try:
+        markdown_text = read_all_files_from_folder(request.folder_name)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        # Query for the overview (title and markdown summary)
+        overview_json_str = generate_overview(markdown_text)
+        overview = json.loads(overview_json_str)
+
+        # Query for key insights array
+        key_insights_json_str = generate_key_insights(markdown_text)
+        key_insights = json.loads(key_insights_json_str)
+
+        # Query for tabs array
+        tabs_json_str = generate_tabs(markdown_text)
+        tabs = json.loads(tabs_json_str)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error processing AI responses: {e}"
+        )
+
+    # Merge the parts into the final result following the complete schema
+    final_result = {
+        "title": overview.get("title", ""),
+        "markdown": overview.get("markdown", ""),
+        "keyInsights": key_insights,
+        "tabs": tabs,
+    }
+    return final_result
+
+
+# To run the API, use the following command:
+# uvicorn your_filename:app --reload
+
+
+# To run the API, use the following command:
+# uvicorn your_filename:app --reload
 # -----------------------------
 # Main Execution
 # -----------------------------
