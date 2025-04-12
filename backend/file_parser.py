@@ -1,11 +1,47 @@
+#!/usr/bin/env python3
 import io
+import os
+import sys
+import json
+import zipfile
+import shutil
 from html import escape
 from collections import deque
 from openpyxl import load_workbook
+from tempfile import NamedTemporaryFile
+from marker.converters.pdf import PdfConverter
+from marker.models import create_model_dict
+from marker.output import text_from_rendered
+
+# -----------------------------
+# Global Directories and Progress Helpers
+# -----------------------------
+# We will use an internal temporary processing folder
+PROCESSING_DIR = os.path.join(os.getcwd(), "processing")
+ANALYSIS_DIR = os.path.join(os.getcwd(), "analysis")
+
+# Ensure necessary directories exist
+os.makedirs(PROCESSING_DIR, exist_ok=True)
+os.makedirs(ANALYSIS_DIR, exist_ok=True)
+
+
+def load_progress(submission_id):
+    progress_file = os.path.join(PROCESSING_DIR, f"progress_{submission_id}.json")
+    if os.path.exists(progress_file):
+        with open(progress_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    else:
+        return {}
+
+
+def save_progress(submission_id, progress):
+    progress_file = os.path.join(PROCESSING_DIR, f"progress_{submission_id}.json")
+    with open(progress_file, "w", encoding="utf-8") as f:
+        json.dump(progress, f, indent=2)
 
 
 # -----------------------------
-# Excel/PDF Conversion Functions
+# Excel/PDF Conversion Functions (unchanged)
 # -----------------------------
 DEFAULT_FILL_COLORS = {None, "00000000", "FFFFFFFF"}
 
@@ -330,38 +366,11 @@ def dataframe_to_markdown(matrix, bounds, merged_cell_map):
     return "\n".join(md_lines)
 
 
-def create_html_from_workbook_bytes(file_bytes: bytes) -> str:
-    try:
-        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error loading workbook: {e}")
-    html_lines = [
-        "<!DOCTYPE html>",
-        "<html>",
-        "<head>",
-        '    <meta charset="UTF-8">',
-        "    <title>Extracted Excel Subtables</title>",
-        "</head>",
-        "<body>",
-        "<h1>Extracted Subtables</h1>",
-    ]
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        html_lines.append("<section>")
-        html_lines.append(f"<h2>Sheet: {escape(sheet_name)}</h2>")
-        sheet_html = process_sheet_html(ws)
-        html_lines.append(sheet_html)
-        html_lines.append("</section>")
-    html_lines.append("</body>")
-    html_lines.append("</html>")
-    return "\n".join(html_lines)
-
-
 def create_markdown_from_workbook_bytes(file_bytes: bytes) -> str:
     try:
         wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error loading workbook: {e}")
+        raise Exception(f"Error loading workbook: {e}")
     md_lines = ["# Extracted Excel Subtables", ""]
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -371,28 +380,6 @@ def create_markdown_from_workbook_bytes(file_bytes: bytes) -> str:
         md_lines.append(sheet_md)
         md_lines.append("")
     return "\n".join(md_lines)
-
-
-def process_sheet_html(ws):
-    matrix, merged_cell_map = get_sheet_matrix(ws)
-    if not matrix:
-        return "<p>No data found in this sheet.</p>"
-    blocks = smart_bfs_components(matrix, merged_cell_map, max_v_gap=2, max_h_gap=1)
-    html_fragments = []
-    for bounds in blocks:
-        top, bottom, left, right = bounds
-        title, is_external_title = extract_title(matrix, bounds, merged_cell_map)
-        html_fragments.append(f"<h3>{escape(title)}</h3>")
-        table_top = (
-            top + 1 if not is_external_title and title != "Untitled Table" else top
-        )
-        if table_top <= bottom:
-            table_html = dataframe_to_html(
-                matrix, (table_top, bottom, left, right), merged_cell_map
-            )
-            html_fragments.append(table_html)
-        html_fragments.append("<hr>")
-    return "\n".join(html_fragments)
 
 
 def process_sheet_markdown(ws):
@@ -418,3 +405,149 @@ def process_sheet_markdown(ws):
         md_fragments.append("---")
         md_fragments.append("")
     return "\n".join(md_fragments)
+
+
+# -----------------------------
+# Processing Functions for Files and Folders
+# -----------------------------
+def process_excel_file(fpath):
+    """Process a single Excel file and return markdown content."""
+    try:
+        with open(fpath, "rb") as f:
+            file_bytes = f.read()
+        return create_markdown_from_workbook_bytes(file_bytes)
+    except Exception as e:
+        return f"Error processing Excel file: {str(e)}"
+
+
+def process_pdf_file(fpath, output_format="md"):
+    """
+    Process a PDF file and return its converted contents.
+
+    This function writes the PDF file to a temporary location (since PdfConverter
+    requires a file path), calls the converter, and then returns the output
+    in Markdown or HTML format.
+    """
+    try:
+        with open(fpath, "rb") as f:
+            file_bytes = f.read()
+        # Write the PDF to a temporary file because PdfConverter requires a file path.
+        with NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp.flush()
+            tmp_filename = tmp.name
+
+        # Create a PDF converter and run it on the temporary file.
+        converter = PdfConverter(artifact_dict=create_model_dict())
+        rendered = converter(tmp_filename)
+        text, _, images = text_from_rendered(rendered)
+
+        # Cleanup the temporary file.
+        os.remove(tmp_filename)
+
+    except Exception as e:
+        return f"Error processing PDF file: {str(e)}"
+
+    # For PDF, default to markdown output.
+    if output_format.lower() == "md":
+        result = text
+    else:
+        # If HTML is requested, you could convert the markdown output to HTML.
+        # For now, we simply return the same text.
+        result = text
+    return result
+
+
+def process_zip_file(fpath, temp_dir):
+    """Extract a ZIP archive and return a list of paths to extracted files."""
+    extracted = []
+    with zipfile.ZipFile(fpath, "r") as zip_ref:
+        zip_ref.extractall(temp_dir)
+        extracted = [os.path.join(temp_dir, name) for name in zip_ref.namelist()]
+    return extracted
+
+
+def process_file(fpath):
+    """
+    Determine file type and process Excel or PDF files.
+    Returns a tuple of (filename, markdown_content) if processed, or None otherwise.
+    """
+    ext = os.path.splitext(fpath)[1].lower()
+    if ext == ".xlsx":
+        return os.path.basename(fpath), process_excel_file(fpath)
+    elif ext == ".pdf":
+        return os.path.basename(fpath), process_pdf_file(fpath)
+    else:
+        return None
+
+
+def process_folder(input_folder, output_folder):
+    """
+    For each file in the input folder:
+      - If the file is a ZIP archive, extract and process its contents.
+      - For Excel (.xlsx) and PDF (.pdf) files, convert to markdown.
+      - For unsupported files, copy them to the output folder.
+    """
+    if not os.path.isdir(input_folder):
+        print(f"Error: {input_folder} is not a directory.")
+        sys.exit(1)
+    os.makedirs(output_folder, exist_ok=True)
+
+    # List all items in the input folder (non-recursive)
+    for item in os.listdir(input_folder):
+        full_path = os.path.join(input_folder, item)
+        if os.path.isfile(full_path):
+            ext = os.path.splitext(full_path)[1].lower()
+            # Create a temporary processing folder for ZIP extraction
+            temp_processing_folder = os.path.join(PROCESSING_DIR, "temp")
+            os.makedirs(temp_processing_folder, exist_ok=True)
+
+            if ext == ".zip" and zipfile.is_zipfile(full_path):
+                print(f"Extracting ZIP archive: {item}")
+                extracted_files = process_zip_file(full_path, temp_processing_folder)
+                for extracted in extracted_files:
+                    result = process_file(extracted)
+                    if result:
+                        out_filename, markdown = result
+                        output_path = os.path.join(output_folder, out_filename + ".md")
+                        with open(output_path, "w", encoding="utf-8") as outf:
+                            outf.write(markdown)
+                        print(
+                            f"Processed {out_filename} from ZIP and wrote to {output_path}"
+                        )
+                    else:
+                        # Unsupported file: copy it to output
+                        dest_path = os.path.join(
+                            output_folder, os.path.basename(extracted)
+                        )
+                        shutil.copy(extracted, dest_path)
+                        print(
+                            f"Copied unsupported file from ZIP: {os.path.basename(extracted)} to {dest_path}"
+                        )
+                # Clean up temp folder after processing zip
+                shutil.rmtree(temp_processing_folder)
+            elif ext in [".xlsx", ".pdf"]:
+                result = process_file(full_path)
+                if result:
+                    out_filename, markdown = result
+                    output_path = os.path.join(output_folder, out_filename + ".md")
+                    with open(output_path, "w", encoding="utf-8") as outf:
+                        outf.write(markdown)
+                    print(f"Processed {item} and wrote to {output_path}")
+            else:
+                # Unsupported file: copy it to output folder
+                dest_path = os.path.join(output_folder, item)
+                shutil.copy(full_path, dest_path)
+                print(f"Copied unsupported file: {item} to {dest_path}")
+
+
+# -----------------------------
+# Main Entry Point
+# -----------------------------
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: python process_folder.py <input_folder> <output_folder>")
+        sys.exit(1)
+    input_folder = sys.argv[1]
+    output_folder = sys.argv[2]
+    process_folder(input_folder, output_folder)

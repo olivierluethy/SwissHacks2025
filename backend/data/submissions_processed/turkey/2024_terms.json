@@ -1,0 +1,55 @@
+{
+  "tax": null,
+  "layers": [
+    {
+      "name": "Layer 1",
+      "flatPremium": null,
+      "layerNumber": "L1",
+      "aggregateLimit": null,
+      "depositPremium": 1151125688,
+      "minimumPremium": 1151125688,
+      "occurrenceLimit": 10000000000,
+      "aggregateAttachment": null,
+      "occurrenceAttachment": 35000000000
+    },
+    {
+      "name": "Layer 2",
+      "flatPremium": null,
+      "layerNumber": "L2",
+      "aggregateLimit": null,
+      "depositPremium": 2027644171,
+      "minimumPremium": 2027644171,
+      "occurrenceLimit": 25000000000,
+      "aggregateAttachment": null,
+      "occurrenceAttachment": 45000000000
+    },
+    {
+      "name": "Layer 3",
+      "flatPremium": null,
+      "layerNumber": "L3",
+      "aggregateLimit": null,
+      "depositPremium": 2237337588,
+      "minimumPremium": 2237337588,
+      "occurrenceLimit": 45000000000,
+      "aggregateAttachment": null,
+      "occurrenceAttachment": 70000000000
+    }
+  ],
+  "perils": [null, "Earthquake", "Fire", "Explosion", "Landslide", "Tsunami"],
+  "regions": [
+    {
+      "state": null,
+      "country": "TR"
+    }
+  ],
+  "brokerage": 0.1,
+  "brokerName": "Broker X",
+  "cedantName": "The Company ABC (Company ABC)",
+  "signatures": [],
+  "contractType": "Occurrence",
+  "currencyCode": "TRY",
+  "inceptionDate": "2024-11-01",
+  "expirationDate": "2025-10-31",
+  "uniqueMarketReference": "Policy ABC",
+  "expiringUniqueMarketReference": "Policy AB"
+}

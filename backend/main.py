@@ -1,11 +1,5 @@
 import os
-import time
 import json
-import shutil
-import zipfile
-import asyncio
-from uuid import uuid4
-from datetime import datetime
 from threading import Lock
 from typing import List
 
@@ -16,14 +10,10 @@ from fastapi import (
     HTTPException,
     Path,
     BackgroundTasks,
-    WebSocket,
-    WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from tempfile import NamedTemporaryFile
-from excel_parsing import create_markdown_from_workbook_bytes
 
 
 # -----------------------------
@@ -64,8 +54,6 @@ def save_progress(submission_id: str, data: dict):
             json.dump(data, f, indent=2)
 
 
-
-
 # -----------------------------
 # FastAPI Application Initialization
 # -----------------------------
@@ -85,30 +73,6 @@ app.mount("/results", StaticFiles(directory=PROCESSED_DIR), name="results")
 # -----------------------------
 # Submission and File Processing Endpoints
 # -----------------------------
-@app.post("/submissions")
-async def create_submission(
-    background_tasks: BackgroundTasks, file: UploadFile = File(...)
-):
-    # Save uploaded file to disk
-    submission_id = str(uuid4())
-    submission_folder = os.path.join(UPLOAD_DIR, submission_id)
-    os.makedirs(submission_folder, exist_ok=True)
-    file_path = os.path.join(submission_folder, file.filename)
-    with open(file_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
-    # Create submission record with initial progress saved to disk
-    submission = {
-        "id": submission_id,
-        "status": "pending",
-        "createdAt": datetime.utcnow().isoformat(),
-        "files": [file.filename],
-        "progress": "File uploaded, waiting for processing",
-    }
-    save_progress(submission_id, submission)
-    # Start background processing task
-    background_tasks.add_task(process_submission, submission_id, file_path)
-    return submission
 
 
 @app.get("/submissions")
@@ -151,109 +115,6 @@ async def upload_additional_files(
     progress["progress"] = "Additional files uploaded, processing started"
     save_progress(submission_id, progress)
     return progress
-
-
-# -----------------------------
-# WebSocket Endpoint for Live Status Updates
-# -----------------------------
-@app.websocket("/ws/{submission_id}")
-async def websocket_endpoint(websocket: WebSocket, submission_id: str):
-    await websocket.accept()
-    try:
-        while True:
-            progress = load_progress(submission_id)
-            await websocket.send_json(progress)
-            await asyncio.sleep(2)
-    except WebSocketDisconnect:
-        print(f"WebSocket disconnected for submission {submission_id}")
-
-
-# -----------------------------
-# Background Processing Function
-# -----------------------------
-def process_submission(submission_id: str, file_path: str):
-    """
-    Process an uploaded file:
-      - If compressed (zip), extract its contents.
-      - Search for Excel (.xlsx) or PDF (.pdf) files.
-      - For each, convert them to markdown.
-      - Save the generated markdown file to the processed folder.
-      - Move the original processed file to the analysis folder.
-      - Update persistent progress along the way.
-    """
-    progress = load_progress(submission_id)
-    progress["progress"] = "Processing started"
-    save_progress(submission_id, progress)
-
-    processing_subdir = os.path.join(PROCESSING_DIR, submission_id)
-    os.makedirs(processing_subdir, exist_ok=True)
-
-    extracted_files = []
-    if zipfile.is_zipfile(file_path):
-        progress["progress"] = "Extracting ZIP archive"
-        save_progress(submission_id, progress)
-        with zipfile.ZipFile(file_path, "r") as zip_ref:
-            zip_ref.extractall(processing_subdir)
-            extracted_files = [
-                os.path.join(processing_subdir, name) for name in zip_ref.namelist()
-            ]
-    else:
-        dest_path = os.path.join(processing_subdir, os.path.basename(file_path))
-        shutil.copy(file_path, dest_path)
-        extracted_files = [dest_path]
-
-    results = {}
-    for fpath in extracted_files:
-        ext = os.path.splitext(fpath)[1].lower()
-        result_md = ""
-        if ext == ".xlsx":
-            try:
-                with open(fpath, "rb") as f:
-                    file_bytes = f.read()
-                result_md = create_markdown_from_workbook_bytes(file_bytes)
-            except Exception as e:
-                result_md = f"Error processing Excel file: {str(e)}"
-        elif ext == ".pdf":
-            try:
-                with NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                    tmp.write(open(fpath, "rb").read())
-                    tmp.flush()
-                    tmp_filename = tmp.name
-                from marker.converters.pdf import PdfConverter
-                from marker.models import create_model_dict
-                from marker.output import text_from_rendered
-
-                converter = PdfConverter(artifact_dict=create_model_dict())
-                rendered = converter(tmp_filename)
-                text, _, images = text_from_rendered(rendered)
-                os.remove(tmp_filename)
-                result_md = text
-            except Exception as e:
-                result_md = f"Error processing PDF file: {str(e)}"
-        else:
-            continue
-        if result_md:
-            submission_processed_dir = os.path.join(PROCESSED_DIR, submission_id)
-            os.makedirs(submission_processed_dir, exist_ok=True)
-            base_name = os.path.splitext(os.path.basename(fpath))[0]
-            out_file = os.path.join(submission_processed_dir, f"{base_name}.md")
-            with open(out_file, "w", encoding="utf-8") as outf:
-                outf.write(result_md)
-            results[os.path.basename(fpath)] = out_file
-        progress["progress"] = f"Processed {os.path.basename(fpath)}"
-        save_progress(submission_id, progress)
-        time.sleep(1)
-
-    analysis_subdir = os.path.join(ANALYSIS_DIR, submission_id)
-    os.makedirs(analysis_subdir, exist_ok=True)
-    for f in extracted_files:
-        shutil.move(f, analysis_subdir)
-
-    progress["status"] = "complete"
-    progress["progress"] = "All files processed"
-    progress["results"] = results
-    progress["processedAt"] = datetime.utcnow().isoformat()
-    save_progress(submission_id, progress)
 
 
 # -----------------------------
@@ -314,98 +175,6 @@ async def delete_file(submission_id: str = Path(...), file_name: str = Path(...)
         progress["files"] = [f for f in progress["files"] if f != file_name]
         save_progress(submission_id, progress)
     return {"success": True, "message": "File deleted successfully"}
-
-
-@app.post("/files/{submission_id}/compare-contracts")
-async def compare_contracts(submission_id: str = Path(...), payload: dict = None):
-    if not payload or "previousFile" not in payload or "currentFile" not in payload:
-        raise HTTPException(
-            status_code=400, detail="Payload must include previousFile and currentFile"
-        )
-    # Simulate contract comparison.
-    comparison = {
-        "clauses": [
-            {
-                "id": "clause-1",
-                "name": "Coverage Territory",
-                "previousText": "This policy covers properties located in Florida, excluding Monroe County.",
-                "currentText": "Now covers Florida excluding Monroe County and coastal areas within 5 miles.",
-                "significance": "high",
-                "changes": [
-                    {"type": "modification", "text": "Added coastal area exclusion."}
-                ],
-            }
-        ]
-    }
-    return comparison
-
-
-@app.post("/files/{submission_id}/analyze-claims")
-async def analyze_claims(submission_id: str = Path(...), payload: dict = None):
-    if not payload or "fileName" not in payload:
-        raise HTTPException(status_code=400, detail="Payload must include fileName")
-    analysis = {
-        "analysis": f"Simulated analysis of claims data from {payload['fileName']}."
-    }
-    return analysis
-
-
-@app.post("/files/{submission_id}/analyze-exposure")
-async def analyze_exposure(submission_id: str = Path(...), payload: dict = None):
-    if not payload or "fileName" not in payload:
-        raise HTTPException(status_code=400, detail="Payload must include fileName")
-    analysis = {
-        "analysis": f"Simulated analysis of exposure data from {payload['fileName']}."
-    }
-    return analysis
-
-
-@app.post("/files/{submission_id}/extract-insights")
-async def extract_insights(submission_id: str = Path(...), payload: dict = None):
-    if not payload or "fileNames" not in payload:
-        raise HTTPException(
-            status_code=400, detail="Payload must include a list of fileNames"
-        )
-    insights = {
-        "insights": f"Simulated insights extracted from files: {', '.join(payload['fileNames'])}."
-    }
-    return insights
-
-
-# -----------------------------
-# Dashboard Endpoint
-# -----------------------------
-@app.get("/dashboard/{submission_id}")
-async def get_dashboard_data(submission_id: str = Path(...)):
-    progress = load_progress(submission_id)
-    if not progress:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    # Simulated dashboard data combining progress and some dummy values.
-    dashboard = {
-        "contractRiskData": {"riskScore": 75},
-        "layerData": {"layerCount": 3},
-        "hurricaneData": {"peakWind": 120},
-        "claimsData": {"totalClaims": 5},
-        "exposureData": {"exposureValue": 1000000},
-        "economicData": {"lossEstimate": 250000},
-        "climateRiskData": {"climateIndex": 0.85},
-        "contractChanges": progress.get("results", {}),
-        "keyInsights": {"summary": "Processed successfully"},
-        "underwriterResponse": progress.get("underwriterResponse", {}),
-    }
-    return dashboard
-
-
-@app.post("/submissions/{submission_id}/response")
-async def submit_underwriter_response(
-    submission_id: str = Path(...), response_data: dict = None
-):
-    progress = load_progress(submission_id)
-    if not progress:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    progress["underwriterResponse"] = response_data or {}
-    save_progress(submission_id, progress)
-    return {"success": True, "message": "Underwriter response submitted successfully"}
 
 
 # -----------------------------
