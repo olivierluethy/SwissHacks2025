@@ -14,7 +14,7 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-
+from data import data_endpoints
 
 # -----------------------------
 # Directory Setup
@@ -58,6 +58,7 @@ def save_progress(submission_id: str, data: dict):
 # FastAPI Application Initialization
 # -----------------------------
 app = FastAPI(title="File Processing API")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -70,10 +71,13 @@ app.add_middleware(
 app.mount("/results", StaticFiles(directory=PROCESSED_DIR), name="results")
 
 
+# Endpoints declared in other files
+app.include_router(data_endpoints.router, prefix='')
+
+
 # -----------------------------
 # Submission and File Processing Endpoints
 # -----------------------------
-
 
 @app.get("/submissions")
 async def list_submissions():
