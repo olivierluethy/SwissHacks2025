@@ -1,168 +1,76 @@
 import { api } from "./api"
 
 // Flag to toggle between mock and real API
-const API_MODE = process.env.NEXT_PUBLIC_API_MODE || "mock"
+const API_MODE = process.env.NEXT_PUBLIC_API_MODE || "real"
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "/api"
 
-// Mock data for AI dashboard
+// Mock dashboard data
 const mockDashboardData = {
-  title: "Florida Property Catastrophe Analysis",
-  markdown: `
-# Florida Property Catastrophe Analysis
-
-This analysis provides a comprehensive overview of the Florida Property Catastrophe submission. The data has been processed using advanced AI algorithms to extract key insights and patterns.
-
-## Overview
-
-The submission contains contract documents, claims data, and exposure information for properties in Florida. The analysis focuses on risk assessment, historical performance, and future projections.
-
-## Key Findings
-
-- **Hurricane Risk**: Category 4-5 hurricane probability has increased by 15% in the last decade
-- **Exposure Concentration**: 65% of insured properties are located in high-risk coastal areas
-- **Claims Trend**: Average claim size has increased by 23% year-over-year
-  `,
+  title: "AI Data Analysis Overview",
+  markdown:
+    "### Number Table\n\n| Number Type  | Value     | Min Range | Max Range |\n|--------------|-----------|-----------|-----------|\n| Integer      | 123       | 1         | 999       |\n| Integer      | 123       | 1         | 999       |\n| Float        | 45.678    | 0.001     | 999.999   |\n| Binary Value | -101      | -1023     | 1024      |\n| Binary Value | -101      | -1023     | 1024      |\n| Hex Value    | abcd1234  | 0x1       | 0x123456  |\n| Hex Value    | abcd1234  | 0x1       | 0x123456  |\n\n### Table 3: Fitness Tracker Data\n\n| Activity     | Calories Burned | Time Spent (min) | Notes            |\n|--------------|-----------------|------------------|------------------|\n| Running      | 587             | 30               | Moderate pace    |\n| Cycling      | 654             | 25               | Enjoying myself  |\n| Swimming     | 489             | 15               | Lap 5 complete   |\n| Yoga         | 321             | 10               | Peaceful session |\n| CrossFit     | 1234            | 45               | Full body workout|",
   keyInsights: [
     {
-      title: "Hurricane Exposure",
-      description: "Category 5 hurricane exclusions reduce overall exposure by 18%",
-      impact: "positive",
-      confidence: 0.87,
-    },
-    {
-      title: "Construction Costs",
-      description: "Rising construction costs (7.1% YoY) may impact claim severity",
+      title: "Duplicate Entries Detected",
+      description:
+        "The number table contains duplicate rows for several number types. This repetition may affect data integrity and could indicate redundant data entries.",
       impact: "negative",
-      confidence: 0.92,
+      confidence: 0.9,
     },
     {
-      title: "Regulatory Changes",
-      description: "Recent Florida insurance reforms provide more stable regulatory environment",
+      title: "Consistent Value Ranges",
+      description:
+        "Each number type entry falls within its specified minimum and maximum ranges, which suggests that the data collection process maintains consistency and reliability.",
       impact: "positive",
-      confidence: 0.78,
+      confidence: 0.95,
     },
     {
-      title: "Claims Frequency",
-      description: "Historical data shows 12% lower claims frequency compared to industry average",
+      title: "Diverse Fitness Tracker Data",
+      description:
+        "The fitness tracker data shows a variety of physical activities with distinct calories burned and time spent. This diversity helps in understanding performance differences across activities.",
       impact: "positive",
-      confidence: 0.85,
+      confidence: 0.8,
     },
   ],
   tabs: [
     {
-      id: "risk-analysis",
-      title: "Risk Analysis",
+      id: "number-table-analysis",
+      title: "Number Table Analysis",
       content: {
         type: "json",
         data: {
           chartType: "bar",
-          title: "Risk Exposure by Category",
-          description: "Comparison of risk exposure across different categories",
-          xAxisLabel: "Risk Category",
-          yAxisLabel: "Exposure ($ Millions)",
+          title: "Number Types Distribution",
+          description: "Visual representation of selected numeric values from the number table.",
+          xAxisLabel: "Number Type",
+          yAxisLabel: "Value",
           data: [
-            { category: "Hurricane", value: 45.2 },
-            { category: "Flood", value: 28.7 },
-            { category: "Fire", value: 12.3 },
-            { category: "Wind", value: 18.9 },
-            { category: "Other", value: 5.6 },
+            {
+              label: "Integer",
+              value: 123,
+            },
+            {
+              label: "Float",
+              value: 45.678,
+            },
+            {
+              label: "Binary Value",
+              value: -101,
+            },
+            {
+              label: "Hex Value",
+              value: 2882343476,
+            },
           ],
         },
       },
     },
     {
-      id: "historical-performance",
-      title: "Historical Performance",
-      content: {
-        type: "json",
-        data: {
-          chartType: "line",
-          title: "Claims History (2018-2023)",
-          description: "Historical claims data over the past 5 years",
-          xAxisLabel: "Year",
-          yAxisLabel: "Claims ($ Millions)",
-          data: [
-            { year: "2018", value: 12.4 },
-            { year: "2019", value: 15.2 },
-            { year: "2020", value: 22.8 },
-            { year: "2021", value: 18.5 },
-            { year: "2022", value: 20.1 },
-            { year: "2023", value: 24.7 },
-          ],
-        },
-      },
-    },
-    {
-      id: "geographic-distribution",
-      title: "Geographic Distribution",
-      content: {
-        type: "json",
-        data: {
-          chartType: "pie",
-          title: "Exposure by County",
-          description: "Distribution of insured properties across Florida counties",
-          data: [
-            { name: "Miami-Dade", value: 35 },
-            { name: "Broward", value: 22 },
-            { name: "Palm Beach", value: 18 },
-            { name: "Orange", value: 12 },
-            { name: "Hillsborough", value: 8 },
-            { name: "Other", value: 5 },
-          ],
-        },
-      },
-    },
-    {
-      id: "contract-analysis",
-      title: "Contract Analysis",
+      id: "fitness-tracker-analysis",
+      title: "Fitness Tracker Analysis",
       content: {
         type: "html",
-        data: `
-          <div class="contract-analysis">
-            <h3 class="text-xl font-bold mb-4">Key Contract Changes</h3>
-            <div class="overflow-x-auto">
-              <table class="min-w-full bg-white border border-gray-200">
-                <thead>
-                  <tr>
-                    <th class="py-2 px-4 border-b">Clause</th>
-                    <th class="py-2 px-4 border-b">Previous</th>
-                    <th class="py-2 px-4 border-b">Current</th>
-                    <th class="py-2 px-4 border-b">Impact</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td class="py-2 px-4 border-b">Hurricane Exclusion</td>
-                    <td class="py-2 px-4 border-b">Category 4-5</td>
-                    <td class="py-2 px-4 border-b">Category 3-5</td>
-                    <td class="py-2 px-4 border-b text-green-600">-15% Risk</td>
-                  </tr>
-                  <tr>
-                    <td class="py-2 px-4 border-b">Deductible</td>
-                    <td class="py-2 px-4 border-b">2% TIV</td>
-                    <td class="py-2 px-4 border-b">3% TIV</td>
-                    <td class="py-2 px-4 border-b text-green-600">-8% Risk</td>
-                  </tr>
-                  <tr>
-                    <td class="py-2 px-4 border-b">Reporting Period</td>
-                    <td class="py-2 px-4 border-b">90 days</td>
-                    <td class="py-2 px-4 border-b">60 days</td>
-                    <td class="py-2 px-4 border-b text-green-600">-3% Risk</td>
-                  </tr>
-                  <tr>
-                    <td class="py-2 px-4 border-b">Cyber Coverage</td>
-                    <td class="py-2 px-4 border-b">Limited</td>
-                    <td class="py-2 px-4 border-b">Excluded</td>
-                    <td class="py-2 px-4 border-b text-green-600">-5% Risk</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="mt-6 p-4 bg-blue-50 rounded-lg">
-              <h4 class="font-semibold mb-2">Analysis Summary</h4>
-              <p>The contract changes represent a significant reduction in risk exposure, particularly through the expanded hurricane exclusions and increased deductibles. Overall risk reduction is estimated at 31%.</p>
-            </div>
-          </div>
-        `,
+        data: "<table border='1' cellspacing='0' cellpadding='5'><tr><th>Activity</th><th>Calories Burned</th><th>Time Spent (min)</th><th>Notes</th></tr><tr><td>Running</td><td>587</td><td>30</td><td>Moderate pace</td></tr><tr><td>Cycling</td><td>654</td><td>25</td><td>Enjoying myself</td></tr><tr><td>Swimming</td><td>489</td><td>15</td><td>Lap 5 complete</td></tr><tr><td>Yoga</td><td>321</td><td>10</td><td>Peaceful session</td></tr><tr><td>CrossFit</td><td>1234</td><td>45</td><td>Full body workout</td></tr></table>",
       },
     },
   ],
@@ -332,7 +240,6 @@ export const aiService = {
         return Promise.resolve({
           status: submission.status,
           progress: submission.progress,
-          lastUpdated: submission.lastUpdated,
           dashboardId: submission.dashboardId,
         })
       }
@@ -382,7 +289,7 @@ export const aiService = {
       return response.data
     } catch (error) {
       console.error("Error fetching chat history:", error)
-      // Return mock data as fallback
+      // Return mock chat history
       return mockChatHistory
     }
   },
@@ -438,6 +345,39 @@ export const aiService = {
       return response.data
     } catch (error) {
       console.error("Error sending message:", error)
+      throw error
+    }
+  },
+
+  /**
+   * Submit feedback on dashboard content
+   * @param {Object} feedback - Feedback data
+   * @returns {Promise<Object>} Feedback response
+   */
+  submitFeedback: async (feedback: {
+    dashboardId: string
+    contentId: string
+    contentType: string
+    feedbackText: string
+    isPositive: boolean
+    selectedText?: string
+  }) => {
+    try {
+      if (API_MODE === "mock") {
+        // Simulate API delay
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+
+        // Return success response
+        return Promise.resolve({
+          success: true,
+          message: "Feedback submitted successfully",
+        })
+      }
+
+      const response = await api.post(`/dashboards/${feedback.dashboardId}/feedback`, feedback)
+      return response.data
+    } catch (error) {
+      console.error("Error submitting feedback:", error)
       throw error
     }
   },

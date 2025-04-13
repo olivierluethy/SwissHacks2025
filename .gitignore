@@ -1,1 +1,4 @@
 *.pyc
+backend/data/ai_cached
+backend/data/progress
+backend/processed

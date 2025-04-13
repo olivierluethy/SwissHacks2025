@@ -1,13 +1,10 @@
 "use client";
 
-import React from "react";
-
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { aiService } from "@/services/ai.service";
-import { Tabs, TabsList, Tab, TabsContent } from "@/components/ui/tabs";
-import { AlertTriangle, ArrowLeft, MessageSquare } from "lucide-react";
-import ReactMarkdown from "react-markdown";
+import React, { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
+import { aiService } from "@/services/ai.service"
+import { Tabs, TabsList, Tab, TabsContent } from "@/components/ui/tabs"
+import { AlertTriangle, ArrowLeft, MessageSquare, Download } from "lucide-react"
 import {
   BarChart,
   Bar,
@@ -23,6 +20,12 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
+
+// Import custom components
+import ExportDialog from "./export-dialog"
+import KeyInsights from "./key-insights"
+import MarkdownContent from "./markdown-content"
+import FeedbackButton from "./feedback-button"
 
 type DashboardProps = {
   dashboardId: string;
@@ -54,11 +57,13 @@ type Dashboard = {
 };
 
 export default function AIDashboard({ dashboardId }: DashboardProps) {
-  const router = useRouter();
-  const [dashboard, setDashboard] = useState<Dashboard | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<string>("");
+  const router = useRouter()
+  const [dashboard, setDashboard] = useState<Dashboard | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<string>("")
+  const [exportModalOpen, setExportModalOpen] = useState(false)
+  const [feedbackSent, setFeedbackSent] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
     const fetchDashboard = async () => {
@@ -86,131 +91,161 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
     router.push("/");
   };
 
-  const renderChart = (chartData: any) => {
-    const { chartType, title, data, xAxisLabel, yAxisLabel } = chartData;
-    const COLORS = [
-      "#0088FE",
-      "#00C49F",
-      "#FFBB28",
-      "#FF8042",
-      "#8884d8",
-      "#82ca9d",
-    ];
+  // Export functionality
+  const exportData = async (format: "pdf" | "text") => {
+    try {
+      if (!dashboard) return
 
-    switch (chartType) {
-      case "bar":
-        return (
-          <div className="h-96 w-full">
-            <h3 className="text-lg font-semibold mb-4">{title}</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis
-                  dataKey={
-                    data[0]?.category
-                      ? "category"
-                      : data[0]?.year
-                      ? "year"
-                      : "name"
-                  }
-                  label={{
-                    value: xAxisLabel,
-                    position: "insideBottom",
-                    offset: -5,
-                  }}
-                />
-                <YAxis
-                  label={{
-                    value: yAxisLabel,
-                    angle: -90,
-                    position: "insideLeft",
-                  }}
-                />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="value" fill="#8884d8" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        );
+      // Create content for export
+      let content = `# ${dashboard.title}\n\n`
 
-      case "line":
-        return (
-          <div className="h-96 w-full">
-            <h3 className="text-lg font-semibold mb-4">{title}</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis
-                  dataKey={data[0]?.year ? "year" : "name"}
-                  label={{
-                    value: xAxisLabel,
-                    position: "insideBottom",
-                    offset: -5,
-                  }}
-                />
-                <YAxis
-                  label={{
-                    value: yAxisLabel,
-                    angle: -90,
-                    position: "insideLeft",
-                  }}
-                />
-                <Tooltip />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey="value"
-                  stroke="#8884d8"
-                  activeDot={{ r: 8 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        );
+      // Add key insights
+      if (dashboard.keyInsights && dashboard.keyInsights.length > 0) {
+        content += "## Key Insights\n\n"
+        dashboard.keyInsights.forEach((insight, index) => {
+          content += `### ${insight.title}\n`
+          content += `${insight.description}\n`
+          content += `Impact: ${insight.impact}, Confidence: ${(insight.confidence * 100).toFixed(0)}%\n\n`
+        })
+      }
 
-      case "pie":
-        return (
-          <div className="h-96 w-full">
-            <h3 className="text-lg font-semibold mb-4">{title}</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={data}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ name, percent }) =>
-                    `${name}: ${(percent * 100).toFixed(0)}%`
-                  }
-                  outerRadius={150}
-                  fill="#8884d8"
-                  dataKey="value"
-                >
-                  {data.map((entry: any, index: number) => (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={COLORS[index % COLORS.length]}
-                    />
-                  ))}
-                </Pie>
-                <Tooltip />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        );
+      // Add markdown content
+      content += "## Analysis\n\n"
+      content += dashboard.markdown
 
-      default:
-        return <div>Unsupported chart type: {chartType}</div>;
+      if (format === "text") {
+        // Create a blob for text download
+        const blob = new Blob([content], { type: "text/plain" })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement("a")
+        a.href = url
+        a.download = `${dashboard.title.replace(/\s+/g, "_")}_export.txt`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      } else {
+        // For PDF, we'll use the API route to generate the PDF
+        const response = await fetch("/api/export-pdf", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: dashboard.title,
+            content: content,
+          }),
+        })
+
+        if (response.ok) {
+          const blob = await response.blob()
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement("a")
+          a.href = url
+          a.download = `${dashboard.title.replace(/\s+/g, "_")}_export.pdf`
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+          URL.revokeObjectURL(url)
+        } else {
+          throw new Error("Failed to generate PDF")
+        }
+      }
+
+      setExportModalOpen(false)
+    } catch (err) {
+      console.error("Error exporting data:", err)
+      alert("Failed to export data. Please try again.")
     }
-  };
+  }
+
+  const renderChart = (chartData: any, tabId: string) => {
+    const { chartType, title, data, xAxisLabel, yAxisLabel } = chartData
+    const COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042", "#8884d8", "#82ca9d"]
+    const contentId = `chart-${tabId}`
+
+    return (
+      <div className="h-96 w-full relative">
+        <div className="absolute top-2 right-2 z-10">
+          <FeedbackButton
+            contentId={contentId}
+            contentType="chart"
+            dashboardId={dashboardId}
+            onFeedbackSent={() => setFeedbackSent((prev) => ({ ...prev, [`chart-${contentId}`]: true }))}
+          />
+        </div>
+
+        <h3 className="text-lg font-semibold mb-4">{title}</h3>
+
+        <ResponsiveContainer width="100%" height="100%">
+          {chartType === "bar" ? (
+            <BarChart data={data}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis
+                dataKey={data[0]?.category ? "category" : data[0]?.year ? "year" : "name"}
+                label={{ value: xAxisLabel, position: "insideBottom", offset: -5 }}
+              />
+              <YAxis label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }} />
+              <Tooltip />
+              <Legend />
+              <Bar dataKey="value" fill="#8884d8" />
+            </BarChart>
+          ) : chartType === "line" ? (
+            <LineChart data={data}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis
+                dataKey={data[0]?.year ? "year" : "name"}
+                label={{ value: xAxisLabel, position: "insideBottom", offset: -5 }}
+              />
+              <YAxis label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }} />
+              <Tooltip />
+              <Legend />
+              <Line type="monotone" dataKey="value" stroke="#8884d8" activeDot={{ r: 8 }} />
+            </LineChart>
+          ) : chartType === "pie" ? (
+            <PieChart>
+              <Pie
+                data={data}
+                cx="50%"
+                cy="50%"
+                labelLine={false}
+                label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                outerRadius={150}
+                fill="#8884d8"
+                dataKey="value"
+              >
+                {data.map((entry: any, index: number) => (
+                  <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                ))}
+              </Pie>
+              <Tooltip />
+              <Legend />
+            </PieChart>
+          ) : (
+            <div>Unsupported chart type: {chartType}</div>
+          )}
+        </ResponsiveContainer>
+      </div>
+    )
+  }
 
   const renderTabContent = (tab: DashboardTab) => {
     if (tab.content.type === "json") {
-      return renderChart(tab.content.data);
+      return renderChart(tab.content.data, tab.id)
     } else if (tab.content.type === "html") {
-      return <div dangerouslySetInnerHTML={{ __html: tab.content.data }} />;
+      return (
+        <div className="relative">
+          <div className="absolute top-2 right-2 z-10">
+            <FeedbackButton
+              contentId={tab.id}
+              contentType="tab"
+              dashboardId={dashboardId}
+              onFeedbackSent={() => setFeedbackSent((prev) => ({ ...prev, [`tab-${tab.id}`]: true }))}
+            />
+          </div>
+          <div dangerouslySetInnerHTML={{ __html: tab.content.data }} />
+        </div>
+      )
     }
 
     return <div>Unsupported content type: {tab.content.type}</div>;
@@ -245,66 +280,33 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
     );
   }
 
-  // Create an array of all tab IDs including the AI chat tab
-  const allTabs = [...dashboard.tabs.map((tab) => tab.id), "ai-chat"];
-
   return (
     <div className="bg-white rounded-lg shadow-sm">
       <div className="p-4 border-b border-gray-200">
-        <button
-          className="flex items-center text-sm text-gray-600 hover:text-blue-600 mb-4"
-          onClick={goBack}
-        >
-          <ArrowLeft className="w-4 h-4 mr-1" />
-          <span>Back to Submissions</span>
-        </button>
+        <div className="flex justify-between items-center mb-4">
+          <button className="flex items-center text-sm text-gray-600 hover:text-blue-600" onClick={goBack}>
+            <ArrowLeft className="w-4 h-4 mr-1" />
+            <span>Back to Submissions</span>
+          </button>
+          <button
+            className="flex items-center text-sm bg-blue-600 text-white px-3 py-2 rounded-md hover:bg-blue-700"
+            onClick={() => setExportModalOpen(true)}
+          >
+            <Download className="w-4 h-4 mr-1" />
+            <span>Export Data</span>
+          </button>
+        </div>
         <h1 className="text-2xl font-bold text-gray-800">{dashboard.title}</h1>
       </div>
 
       <div className="p-6">
-        {/* Markdown Content */}
-        <div className="prose max-w-none mb-8">
-          <ReactMarkdown>{dashboard.markdown}</ReactMarkdown>
-        </div>
+        {/* Markdown Content with Feedback Option */}
+        <MarkdownContent content={dashboard.markdown} dashboardId={dashboardId} />
 
-        {/* Key Insights */}
-        <div className="mb-8">
-          <h2 className="text-xl font-semibold mb-4">Key Insights</h2>
-          <div className="grid grid-rows-1 md:grid-rows-2 lg:grid-rows-4 gap-4">
-            {dashboard.keyInsights.map((insight, index) => (
-              <div
-                key={index}
-                className={`p-4 rounded-lg border-l-4 ${
-                  insight.impact === "positive"
-                    ? "border-green-500 bg-green-50"
-                    : insight.impact === "negative"
-                    ? "border-red-500 bg-red-50"
-                    : "border-blue-500 bg-blue-50"
-                }`}
-              >
-                <h3 className="font-semibold mb-2">{insight.title}</h3>
-                <p className="text-sm">{insight.description}</p>
-                <div className="mt-2 flex justify-between items-center text-xs text-gray-500">
-                  <span>
-                    Confidence: {(insight.confidence * 100).toFixed(0)}%
-                  </span>
-                  <span
-                    className={`font-medium ${
-                      insight.impact === "positive"
-                        ? "text-green-600"
-                        : insight.impact === "negative"
-                        ? "text-red-600"
-                        : "text-blue-600"
-                    }`}
-                  >
-                    {insight.impact.charAt(0).toUpperCase() +
-                      insight.impact.slice(1)}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
+        {/* Key Insights Section */}
+        {dashboard.keyInsights && dashboard.keyInsights.length > 0 && (
+          <KeyInsights insights={dashboard.keyInsights} dashboardId={dashboardId} />
+        )}
 
         {/* Tabs */}
         <div>
@@ -333,6 +335,14 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
           </Tabs>
         </div>
       </div>
+
+      {/* Export Dialog */}
+      <ExportDialog
+        isOpen={exportModalOpen}
+        onClose={() => setExportModalOpen(false)}
+        onExport={exportData}
+        title={dashboard.title}
+      />
     </div>
   );
 }
@@ -484,10 +494,7 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
     <div className="flex flex-col h-[600px] border border-gray-200 rounded-lg">
       <div className="p-4 border-b border-gray-200">
         <h2 className="text-lg font-semibold">Ask AI About This Submission</h2>
-        <p className="text-sm text-gray-500">
-          Ask questions about the submission data, contract terms, or risk
-          analysis
-        </p>
+        <p className="text-sm text-gray-500">Ask questions about the submission data, contract terms, or risk</p>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">

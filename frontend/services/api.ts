@@ -6,16 +6,26 @@ export const api = axios.create({
     ? process.env.NEXT_PUBLIC_API_URL.startsWith("http")
       ? process.env.NEXT_PUBLIC_API_URL
       : `https://${process.env.NEXT_PUBLIC_API_URL}`
-    : "http://localhost:5000/api",
+    : "",
   headers: {
     "Content-Type": "application/json",
   },
 })
 
-// Add request interceptor
+// Add request interceptor to handle CORS by proxying through Next.js API routes
 api.interceptors.request.use(
   (config) => {
-    // You can add auth token here if needed
+    // If we're in the browser and the URL is the backend directly,
+    // route through our Next.js API proxy to avoid CORS issues
+    if (typeof window !== "undefined" && config.url && !config.url.startsWith("/api/proxy")) {
+      // Extract the path from the full URL
+      const urlObj = new URL(config.url, "http://localhost:8000")
+      const path = urlObj.pathname.replace(/^\/api\//, "")
+
+      // Rewrite the URL to use our proxy
+      config.url = `/api/proxy/${path}`
+    }
+
     return config
   },
   (error) => {

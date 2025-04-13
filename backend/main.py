@@ -1,20 +1,13 @@
 import os
 import json
+import re
+import hashlib
+import asyncio
 from threading import Lock
-from typing import List
 
-from fastapi import (
-    FastAPI,
-    UploadFile,
-    File,
-    HTTPException,
-    Path,
-    BackgroundTasks,
-)
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-import re
 from openai import OpenAI
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 from pydantic import BaseModel
@@ -24,9 +17,17 @@ from data import data_endpoints
 from data.data_endpoints import get_top_k_related_files_contents
 
 # Set your OpenAI API key (ensure this key is available in your environment)
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 MODEL_NAME = "o3-mini"  # Or "gpt-4" if desired
 
-app = FastAPI()
+app = FastAPI(title="Async File Processing API with AI Caching and Progress")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -----------------------------
 # Directory Setup
@@ -35,9 +36,19 @@ UPLOAD_DIR = "uploads"
 PROCESSING_DIR = "processing"
 PROCESSED_DIR = "processed"
 ANALYSIS_DIR = "analysis"
-PROGRESS_DIR = "progress"  # Persist progress per submission
+AI_CACHED_DIR = "data/ai_cached"  # Cache AI results and dashboards
+PROGRESS_DIR = "data/progress"  # Persist progress per submission
+SUBMISSIONS_DIR = "data/submissions_processed"  # Processed submissions
 
-for folder in [UPLOAD_DIR, PROCESSING_DIR, PROCESSED_DIR, ANALYSIS_DIR, PROGRESS_DIR]:
+for folder in [
+    UPLOAD_DIR,
+    PROCESSING_DIR,
+    PROCESSED_DIR,
+    ANALYSIS_DIR,
+    AI_CACHED_DIR,
+    SUBMISSIONS_DIR,
+    PROGRESS_DIR,
+]:
     os.makedirs(folder, exist_ok=True)
 
 # Lock for progress file writes
@@ -45,7 +56,7 @@ progress_lock = Lock()
 
 
 # -----------------------------
-# Utility: Persistent progress
+# Utility: Persistent Progress
 # -----------------------------
 def get_progress_path(submission_id: str) -> str:
     return os.path.join(PROGRESS_DIR, f"progress_{submission_id}.json")
@@ -56,7 +67,7 @@ def load_progress(submission_id: str) -> dict:
     if os.path.exists(progress_path):
         with open(progress_path, "r") as f:
             return json.load(f)
-    return {}
+    return {"status": "pending", "progress": 0, "results": {}}
 
 
 def save_progress(submission_id: str, data: dict):
@@ -67,7 +78,7 @@ def save_progress(submission_id: str, data: dict):
 
 
 # -----------------------------
-# FastAPI Application Initialization
+# Serve Static Files for Processed Results and Dashboards
 # -----------------------------
 app = FastAPI(title="File Processing API")
 
@@ -88,186 +99,94 @@ app.include_router(data_endpoints.router, prefix='')
 
 
 # -----------------------------
-# Submission and File Processing Endpoints
+# Submission Endpoints
 # -----------------------------
-
 @app.get("/submissions")
 async def list_submissions():
-    # List all submissions by scanning PROGRESS_DIR
     submissions = []
-    for fname in os.listdir(PROGRESS_DIR):
-        if fname.startswith("progress_") and fname.endswith(".json"):
-            submission_id = fname[len("progress_") : -len(".json")]
-            submissions.append(load_progress(submission_id))
+    for fname in os.listdir(SUBMISSIONS_DIR):
+        submission_path = os.path.join(SUBMISSIONS_DIR, fname)
+        if os.path.isdir(submission_path):
+            if os.path.exists(get_progress_path(fname)):
+                progress = await asyncio.to_thread(load_progress, fname)
+                if progress.get("status") == "completed":
+                    submissions.append(
+                        {
+                            "id": fname,
+                            "status": "completed",
+                            "dashboardId": fname + "_dashboard",
+                        }
+                    )
+                else:
+                    submissions.append({"id": fname, "status": "pending"})
+            else:
+                submissions.append({"id": fname})
     return submissions
 
 
-@app.get("/submissions/{submission_id}")
+@app.get("/submissions/{submission_id}/status")
 async def get_submission_status(submission_id: str = Path(...)):
-    progress = load_progress(submission_id)
+    progress = await asyncio.to_thread(load_progress, submission_id)
     if not progress:
         raise HTTPException(status_code=404, detail="Submission not found")
-    return progress
+    return {
+        "status": progress.get("status", "pending"),
+        "progress": progress.get("progress", 0),
+        "dashboardId": submission_id + "_dashboard",
+    }
 
 
-@app.post("/submissions/{submission_id}/files")
-async def upload_additional_files(
-    submission_id: str = Path(...),
-    background_tasks: BackgroundTasks = None,
-    files: List[UploadFile] = File(...),
-):
-    progress = load_progress(submission_id)
-    if not progress:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    submission_folder = os.path.join(UPLOAD_DIR, submission_id)
-    os.makedirs(submission_folder, exist_ok=True)
-    for file in files:
-        file_path = os.path.join(submission_folder, file.filename)
-        with open(file_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-        progress["files"].append(file.filename)
-        background_tasks.add_task(process_submission, submission_id, file_path)
-    progress["progress"] = "Additional files uploaded, processing started"
-    save_progress(submission_id, progress)
-    return progress
+@app.get("/dashboards/{dashboard_id}")
+async def get_dashboard(dashboard_id: str = Path(...)):
+    dashboard_file = os.path.join(AI_CACHED_DIR, f"{dashboard_id}.json")
+    if not os.path.exists(dashboard_file):
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    with open(dashboard_file, "r") as f:
+        dashboard_data = json.load(f)
+    return dashboard_data
 
 
 # -----------------------------
-# Endpoints for File Operations
+# AI Caching Helpers
 # -----------------------------
-@app.get("/files/{submission_id}")
-async def get_submission_files(submission_id: str = Path(...)):
-    progress = load_progress(submission_id)
-    if not progress:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    return {"files": progress.get("files", []), "results": progress.get("results", {})}
+def get_cache_filename(query_type: str, input_text: str) -> str:
+    """Generate a cache filename based on query type and input content."""
+    key = f"{query_type}_{input_text}"
+    hash_key = hashlib.md5(key.encode("utf-8")).hexdigest()
+    return os.path.join(AI_CACHED_DIR, f"{hash_key}_{query_type}.json")
 
 
-@app.get("/files/{submission_id}/{file_name}/content")
-async def get_file_content(submission_id: str = Path(...), file_name: str = Path(...)):
-    # Look in the processed folder for a markdown file matching the base name.
-    submission_processed_dir = os.path.join(PROCESSED_DIR, submission_id)
-    base_name = os.path.splitext(file_name)[0]
-    md_file = os.path.join(submission_processed_dir, f"{base_name}.md")
-    if not os.path.exists(md_file):
-        raise HTTPException(status_code=404, detail="Processed file not found")
-    with open(md_file, "r", encoding="utf-8") as f:
-        content = f.read()
-    return {"text": content}
-
-
-@app.get("/files/{submission_id}/{file_name}/download")
-async def download_file(submission_id: str = Path(...), file_name: str = Path(...)):
-    # Try to locate the original file in the analysis folder first.
-    analysis_subdir = os.path.join(ANALYSIS_DIR, submission_id)
-    file_path = os.path.join(analysis_subdir, file_name)
-    if not os.path.exists(file_path):
-        # Fall back to looking in the upload folder.
-        upload_subdir = os.path.join(UPLOAD_DIR, submission_id)
-        file_path = os.path.join(upload_subdir, file_name)
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(
-        file_path, media_type="application/octet-stream", filename=file_name
-    )
-
-
-@app.delete("/files/{submission_id}/{file_name}")
-async def delete_file(submission_id: str = Path(...), file_name: str = Path(...)):
-    # Remove file from analysis folder if exists.
-    analysis_subdir = os.path.join(ANALYSIS_DIR, submission_id)
-    file_path = os.path.join(analysis_subdir, file_name)
-    if os.path.exists(file_path):
-        os.remove(file_path)
-    # Also remove from processed folder (if markdown exists)
-    submission_processed_dir = os.path.join(PROCESSED_DIR, submission_id)
-    base_name = os.path.splitext(file_name)[0]
-    md_file = os.path.join(submission_processed_dir, f"{base_name}.md")
-    if os.path.exists(md_file):
-        os.remove(md_file)
-    progress = load_progress(submission_id)
-    if progress and "files" in progress:
-        progress["files"] = [f for f in progress["files"] if f != file_name]
-        save_progress(submission_id, progress)
-    return {"success": True, "message": "File deleted successfully"}
-
-
-class AnalysisRequest(BaseModel):
-    folder_name: str
-
-
-def read_all_files_from_folder(folder_name: str) -> str:
+def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
     """
-    Reads all files (ignoring subfolders) in the provided folder and concatenates
-    their contents into a single markdown string.
+    Check if a cached AI response exists for the prompt and query type.
+    If so, return it; otherwise, call the AI API, cache and return the result.
     """
-    if not os.path.exists(folder_name):
-        raise FileNotFoundError(f"Folder '{folder_name}' does not exist.")
-    if not os.path.isdir(folder_name):
-        raise NotADirectoryError(f"'{folder_name}' is not a directory.")
+    cache_file = get_cache_filename(query_type, prompt)
+    if os.path.exists(cache_file):
+        with open(cache_file, "r") as f:
+            cached_response = json.load(f)
+        return cached_response["response"]
 
-    combined_text = ""
-    for file_name in os.listdir(folder_name):
-        file_path = os.path.join(folder_name, file_name)
-        if os.path.isfile(file_path):
-            try:
-                with open(file_path, encoding="utf8") as f:
-                    file_contents = f.read()
-                    combined_text += file_contents + "\n\n"
-            except Exception as e:
-                raise Exception(f"Error reading file {file_path}: {e}")
-    return combined_text.strip()
-
-
-def query_ai(prompt: str, model_name: str = MODEL_NAME) -> str:
-    """
-    Sends the provided prompt to the ChatGPT API and returns the raw text response.
-    Removes any <think> sections that the model might include.
-    """
     try:
         response = client.chat.completions.create(
-            model=model_name, messages=[{"role": "user", "content": prompt}]
+            model=MODEL_NAME, messages=[{"role": "user", "content": prompt}]
         )
-        # Extract the assistant's message content.
         content = response.choices[0].message.content
-        # Remove any embedded <think> sections if present.
-        cleaned_content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
-        return cleaned_content.strip()
+        # Clean up any <think> blocks if present
+        cleaned_content = re.sub(
+            r"<think>.*?</think>\s*", "", content, flags=re.DOTALL
+        ).strip()
+        with open(cache_file, "w") as f:
+            json.dump({"response": cleaned_content}, f, indent=2)
+        return cleaned_content
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error querying the AI: {e}")
 
 
-def clean_and_parse_json(text: str):
-    """
-    Cleans the text by removing markdown code fences and applying regex fixes
-    for common JSON errors, then attempts to parse it.
-    """
-    # Remove markdown code blocks (```json or ```)
-    text = re.sub(r"```json\s*|```\s*", "", text).strip()
-
-    # Ensure keys are quoted properly:
-    text = re.sub(r"([{,]\s*)(\w+)(\s*:)", r'\1"\2"\3', text)
-
-    # Fix string values that might not be properly quoted
-    text = re.sub(r':\s*"([^"]*)"([^,\]}])', r': "\1"\2', text)
-
-    # Remove any trailing commas in objects or arrays
-    text = re.sub(r",\s*([\]}])", r"\1", text)
-
-    try:
-        return json.loads(text)
-    except Exception as error:
-        print("Error parsing JSON:", error)
-        print("Cleaned text was:", text)
-        raise error
-
-
-def generate_overview(markdown_text: str, context: str) -> str:
-    """
-    Queries the AI for the overview part of the JSON.
-    The resulting JSON should only contain the "title" and "markdown" fields.
-    """
+# -----------------------------
+# AI Query Functions
+# -----------------------------
+def generate_overview(markdown_text: str, submission_id: str) -> str:
     prompt = f"""
 Generate your result following the JSON schema as defined below.
 You must output ONLY valid JSON and nothing else.
@@ -280,14 +199,8 @@ JSON Schema for this part:
   "type": "object",
   "required": ["title", "markdown"],
   "properties": {{
-    "title": {{
-      "type": "string",
-      "description": "The main title of the analysis report"
-    }},
-    "markdown": {{
-      "type": "string",
-      "description": "Markdown-formatted summary of the analysis"
-    }}
+    "title": {{"type": "string", "description": "The main title of the analysis report"}},
+    "markdown": {{"type": "string", "description": "Markdown-formatted summary of the analysis"}}
   }}
 }}
 
@@ -299,14 +212,10 @@ Markdown input to analyze:
 
 Ensure that you output only JSON following the schema.
 """
-    return query_ai(prompt)
+    return cached_ai_query(prompt, "overview", submission_id)
 
 
-def generate_key_insights(markdown_text: str, context: str) -> str:
-    """
-    Queries the AI to generate the 'keyInsights' array.
-    Each insight contains title, description, impact, and confidence.
-    """
+def generate_key_insights(markdown_text: str, submission_id: str) -> str:
     prompt = f"""
 Generate your result following the JSON schema as defined below.
 You must output ONLY valid JSON and nothing else.
@@ -322,25 +231,10 @@ JSON Schema for keyInsights:
     "type": "object",
     "required": ["title", "description", "impact", "confidence"],
     "properties": {{
-      "title": {{
-        "type": "string",
-        "description": "Short title or headline summarizing the insight"
-      }},
-      "description": {{
-        "type": "string",
-        "description": "Detailed explanation of the insight"
-      }},
-      "impact": {{
-        "type": "string",
-        "enum": ["positive", "negative"],
-        "description": "Indicates whether the insight has a positive or negative effect on risk or performance"
-      }},
-      "confidence": {{
-        "type": "number",
-        "minimum": 0,
-        "maximum": 1,
-        "description": "Confidence score between 0 and 1 indicating the reliability of the insight"
-      }}
+      "title": {{"type": "string", "description": "Short title or headline summarizing the insight"}},
+      "description": {{"type": "string", "description": "Detailed explanation of the insight"}},
+      "impact": {{"type": "string", "enum": ["positive", "negative"], "description": "Indicates whether the insight has a positive or negative effect on risk or performance"}},
+      "confidence": {{"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence score between 0 and 1 indicating the reliability of the insight"}}
     }}
   }}
 }}
@@ -353,14 +247,10 @@ Markdown input to analyze:
 
 Return only a JSON array that strictly adheres to the schema.
 """
-    return query_ai(prompt)
+    return cached_ai_query(prompt, "key_insights", submission_id)
 
 
-def generate_tabs(markdown_text: str, context: str) -> str:
-    """
-    Queries the AI to generate the 'tabs' array.
-    Each tab includes an id, a title, and content (either a JSON chart or an HTML string).
-    """
+def generate_tabs(markdown_text: str, submission_id: str) -> str:
     prompt = f"""
 Generate your result following the JSON schema as defined below.
 You must output ONLY valid JSON and nothing else.
@@ -376,23 +266,13 @@ JSON Schema for tabs:
     "type": "object",
     "required": ["id", "title", "content"],
     "properties": {{
-      "id": {{
-        "type": "string",
-        "description": "Unique identifier for the tab"
-      }},
-      "title": {{
-        "type": "string",
-        "description": "Title of the tab shown in the UI"
-      }},
+      "id": {{"type": "string", "description": "Unique identifier for the tab"}},
+      "title": {{"type": "string", "description": "Title of the tab shown in the UI"}},
       "content": {{
         "type": "object",
         "required": ["type", "data"],
         "properties": {{
-          "type": {{
-            "type": "string",
-            "enum": ["json", "html"],
-            "description": "The format of the content: either a JSON chart or an HTML table/summary"
-          }},
+          "type": {{"type": "string", "enum": ["json", "html"], "description": "The format of the content: either a JSON chart or an HTML table/summary"}},
           "data": {{
             "description": "Chart or HTML content depending on the specified type",
             "oneOf": [
@@ -400,31 +280,17 @@ JSON Schema for tabs:
                 "type": "object",
                 "required": ["chartType", "title", "description", "data"],
                 "properties": {{
-                  "chartType": {{
-                    "type": "string",
-                    "enum": ["bar", "line", "pie"]
-                  }},
-                  "title": {{
-                    "type": "string"
-                  }},
-                  "description": {{
-                    "type": "string"
-                  }},
-                  "xAxisLabel": {{
-                    "type": "string"
-                  }},
-                  "yAxisLabel": {{
-                    "type": "string"
-                  }},
+                  "chartType": {{"type": "string", "enum": ["bar", "line", "pie"]}},
+                  "title": {{"type": "string"}},
+                  "description": {{"type": "string"}},
+                  "xAxisLabel": {{"type": "string"}},
+                  "yAxisLabel": {{"type": "string"}},
                   "data": {{
                     "type": "array",
                     "items": {{
                       "type": "object",
                       "properties": {{
-                        "value": {{
-                          "type": "number",
-                          "description": "Numerical value of the data point"
-                        }}
+                        "value": {{"type": "number", "description": "Numerical value of the data point"}}
                       }},
                       "required": ["value"],
                       "minProperties": 2
@@ -452,12 +318,44 @@ Markdown input to analyze:
 
 Return only a JSON array that strictly adheres to the schema.
 """
-    return query_ai(prompt)
+    return cached_ai_query(prompt, "tabs", submission_id)
 
 
-@app.post("/analyze")
-async def analyze(request: AnalysisRequest):
-    # Read all files from the provided folder and combine their contents.
+# -----------------------------
+# Utility: Read Files from Folder (Blocking)
+# -----------------------------
+def read_all_files_from_folder(folder_name: str) -> str:
+    """
+    Reads all files (ignoring subfolders) in the provided folder and concatenates
+    their contents into a single Markdown string.
+    """
+    if not os.path.exists(folder_name):
+        raise FileNotFoundError(f"Folder '{folder_name}' does not exist.")
+    if not os.path.isdir(folder_name):
+        raise NotADirectoryError(f"'{folder_name}' is not a directory.")
+
+    combined_text = ""
+    for file_name in os.listdir(folder_name):
+        file_path = os.path.join(folder_name, file_name)
+        if os.path.isfile(file_path):
+            try:
+                with open(file_path, encoding="utf8") as f:
+                    file_contents = f.read()
+                    combined_text += file_contents + "\n\n"
+            except Exception as e:
+                raise Exception(f"Error reading file {file_path}: {e}")
+    return combined_text.strip()
+
+
+def clean_and_parse_json(text: str):
+    """
+    Cleans the text by removing markdown code fences and applying regex fixes
+    for common JSON errors, then attempts to parse it.
+    """
+    text = re.sub(r"```json\s*|```\s*", "", text).strip()
+    text = re.sub(r"([{,]\s*)(\w+)(\s*:)", r'\1"\2"\3', text)
+    text = re.sub(r':\s*"([^"]*)"([^,\]}])', r': "\1"\2', text)
+    text = re.sub(r",\s*([\]}])", r"\1", text)
     try:
         markdown_text = read_all_files_from_folder(request.folder_name)
         context = get_top_k_related_files_contents(markdown_text, k=10)
@@ -465,32 +363,65 @@ async def analyze(request: AnalysisRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        # Query for the overview (title and markdown summary)
-        overview_json_str = generate_overview(markdown_text, context)
+        # Generate Overview (update progress to 33%)
+        overview_json_str = await asyncio.to_thread(
+            generate_overview, markdown_text, submission_id
+        )
         print("Overview JSON:", overview_json_str)
-        overview = clean_and_parse_json(overview_json_str)
+        overview = await asyncio.to_thread(clean_and_parse_json, overview_json_str)
+        progress["results"]["overview"] = overview
+        progress["progress"] = 33
+        await asyncio.to_thread(save_progress, submission_id, progress)
 
-        # Query for key insights array
-        key_insights_json_str = generate_key_insights(markdown_text, context)
+        # Generate Key Insights (update progress to 66%)
+        key_insights_json_str = await asyncio.to_thread(
+            generate_key_insights, markdown_text, submission_id
+        )
         print("Key Insights JSON:", key_insights_json_str)
-        key_insights = clean_and_parse_json(key_insights_json_str)
+        key_insights = await asyncio.to_thread(
+            clean_and_parse_json, key_insights_json_str
+        )
+        progress["results"]["keyInsights"] = key_insights
+        progress["progress"] = 66
+        await asyncio.to_thread(save_progress, submission_id, progress)
 
-        # Query for tabs array
-        tabs_json_str = generate_tabs(markdown_text, context)
+        # Generate Tabs (update progress to 100%)
+        tabs_json_str = await asyncio.to_thread(
+            generate_tabs, markdown_text, submission_id
+        )
         print("Tabs JSON:", tabs_json_str)
-        tabs = clean_and_parse_json(tabs_json_str)
+        tabs = await asyncio.to_thread(clean_and_parse_json, tabs_json_str)
+        progress["results"]["tabs"] = tabs
+        progress["progress"] = 100
+        progress["status"] = "completed"
+        await asyncio.to_thread(save_progress, submission_id, progress)
     except Exception as e:
+        progress["status"] = "failed"
+        await asyncio.to_thread(save_progress, submission_id, progress)
         raise HTTPException(
             status_code=500, detail=f"Error processing AI responses: {e}"
         )
 
-    # Merge the parts into the final result following the complete schema
+    # Merge parts into the final result schema
     final_result = {
         "title": overview.get("title", ""),
         "markdown": overview.get("markdown", ""),
         "keyInsights": key_insights,
         "tabs": tabs,
     }
+
+    # Save final result for external reference (as processed result)
+    final_result_path = os.path.join(PROCESSED_DIR, f"{submission_id}_result.json")
+    await asyncio.to_thread(
+        lambda: open(final_result_path, "w").write(json.dumps(final_result, indent=2))
+    )
+
+    # Also, save the dashboard result for retrieval by the dashboards endpoint
+    dashboard_path = os.path.join(AI_CACHED_DIR, f"{submission_id}_dashboard.json")
+    await asyncio.to_thread(
+        lambda: open(dashboard_path, "w").write(json.dumps(final_result, indent=2))
+    )
+
     return final_result
 
 
@@ -500,4 +431,4 @@ async def analyze(request: AnalysisRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -3,14 +3,12 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { aiService } from "@/services/ai.service"
-import { FileText, AlertTriangle, CheckCircle, Clock, RefreshCw, Play, Loader2 } from "lucide-react"
+import { FileText, AlertTriangle, CheckCircle, Clock, RefreshCw, Play, Loader2, FileSearch } from "lucide-react"
 
 type Submission = {
   id: string
   name: string
-  status: "pending" | "processing" | "completed" | "failed"
-  lastUpdated: string
-  progress: number
+  status: "pending_analysis" | "analyzing" | "pending_review"
   dashboardId?: string
 }
 
@@ -29,7 +27,7 @@ export default function SubmissionList() {
 
   // Poll for updates on processing submissions
   useEffect(() => {
-    const processingIds = submissions.filter((sub) => sub.status === "processing").map((sub) => sub.id)
+    const processingIds = submissions.filter((sub) => sub.status === "analyzing").map((sub) => sub.id)
 
     if (processingIds.length === 0) return
 
@@ -46,12 +44,33 @@ export default function SubmissionList() {
     try {
       setLoading(true)
       const data = await aiService.getSubmissions()
-      setSubmissions(data)
+
+      // Map the old status values to new ones
+      const mappedData = data.map((sub: any) => ({
+        ...sub,
+        status: mapStatus(sub.status),
+      }))
+
+      setSubmissions(mappedData)
     } catch (err) {
       console.error("Error fetching submissions:", err)
       setError("Failed to load submissions")
     } finally {
       setLoading(false)
+    }
+  }
+
+  // Map old status values to new ones
+  const mapStatus = (oldStatus: string): "pending_analysis" | "analyzing" | "pending_review" => {
+    switch (oldStatus) {
+      case "pending":
+        return "pending_analysis"
+      case "processing":
+        return "analyzing"
+      case "completed":
+        return "pending_review"
+      default:
+        return "pending_analysis"
     }
   }
 
@@ -72,13 +91,7 @@ export default function SubmissionList() {
       await aiService.processSubmission(submissionId)
 
       // Update submission status
-      setSubmissions((prev) =>
-        prev.map((sub) =>
-          sub.id === submissionId
-            ? { ...sub, status: "processing", progress: 5, lastUpdated: new Date().toISOString() }
-            : sub,
-        ),
-      )
+      setSubmissions((prev) => prev.map((sub) => (sub.id === submissionId ? { ...sub, status: "analyzing" } : sub)))
     } catch (err) {
       console.error("Error processing submission:", err)
     } finally {
@@ -95,9 +108,7 @@ export default function SubmissionList() {
           sub.id === submissionId
             ? {
                 ...sub,
-                status: status.status,
-                progress: status.progress,
-                lastUpdated: status.lastUpdated,
+                status: mapStatus(status.status),
                 dashboardId: status.dashboardId,
               }
             : sub,
@@ -112,19 +123,12 @@ export default function SubmissionList() {
     router.push(`/dashboard/${dashboardId}`)
   }
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString)
-    return date.toLocaleString()
-  }
-
   const getStatusIcon = (status: string) => {
     switch (status) {
-      case "completed":
+      case "pending_review":
         return <CheckCircle className="w-5 h-5 text-green-500" />
-      case "processing":
+      case "analyzing":
         return <Clock className="w-5 h-5 text-blue-500" />
-      case "failed":
-        return <AlertTriangle className="w-5 h-5 text-red-500" />
       default:
         return <FileText className="w-5 h-5 text-gray-500" />
     }
@@ -132,33 +136,34 @@ export default function SubmissionList() {
 
   const getStatusText = (status: string) => {
     switch (status) {
-      case "completed":
-        return "Completed"
-      case "processing":
-        return "Processing"
-      case "failed":
-        return "Failed"
+      case "pending_review":
+        return "Pending Review"
+      case "analyzing":
+        return "Analyzing"
       default:
-        return "Pending"
+        return "Pending Analysis"
     }
   }
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-        <span className="ml-2 text-gray-600">Loading submissions...</span>
+      <div className="flex flex-col items-center justify-center h-64 bg-white rounded-lg shadow-sm p-8">
+        <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <span className="text-gray-600 font-medium">Loading submissions...</span>
       </div>
     )
   }
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center h-64">
-        <AlertTriangle className="w-12 h-12 text-red-500 mb-4" />
+      <div className="flex flex-col items-center justify-center h-64 bg-white rounded-lg shadow-sm p-8">
+        <AlertTriangle className="w-16 h-16 text-red-500 mb-4" />
         <h2 className="text-xl font-semibold text-gray-800 mb-2">Error Loading Submissions</h2>
-        <p className="text-gray-600">{error}</p>
-        <button className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-md" onClick={refreshSubmissions}>
+        <p className="text-gray-600 mb-6">{error}</p>
+        <button
+          className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+          onClick={refreshSubmissions}
+        >
           Retry
         </button>
       </div>
@@ -167,130 +172,123 @@ export default function SubmissionList() {
 
   if (submissions.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-64">
-        <FileText className="w-12 h-12 text-gray-400 mb-4" />
+      <div className="flex flex-col items-center justify-center h-64 bg-white rounded-lg shadow-sm p-8">
+        <FileText className="w-16 h-16 text-gray-400 mb-4" />
         <h2 className="text-xl font-semibold text-gray-800 mb-2">No Submissions Found</h2>
         <p className="text-gray-600 mb-6">There are no submissions available for analysis</p>
+        <button
+          className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+          onClick={refreshSubmissions}
+        >
+          Refresh
+        </button>
       </div>
     )
   }
 
   return (
-    <div className="bg-white rounded-lg shadow-sm">
-      <div className="flex justify-between items-center p-4 border-b border-gray-200">
-        <h2 className="text-lg font-semibold text-gray-800">Submissions</h2>
-        <button
-          className="flex items-center text-sm text-gray-600 hover:text-blue-600"
-          onClick={refreshSubmissions}
-          disabled={refreshing}
-        >
-          {refreshing ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-1" />}
-          <span>Refresh</span>
-        </button>
+    <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+      <div className="flex justify-between items-center p-5 border-b border-gray-200">
+        <h2 className="text-xl font-semibold text-gray-800">Submissions</h2>
+        <div className="flex items-center space-x-2">
+          <button
+            className="flex items-center text-sm text-gray-600 hover:text-blue-600 transition-colors px-3 py-1.5 rounded-md hover:bg-gray-100"
+            onClick={refreshSubmissions}
+            disabled={refreshing}
+          >
+            {refreshing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
 
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Last Updated
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Progress
-              </th>
-              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+              <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+              <th className="px-6 py-4 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Actions
               </th>
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
             {submissions.map((submission) => (
-              <tr key={submission.id} className="hover:bg-gray-50">
-                <td className="px-6 py-4 whitespace-nowrap">
+              <tr key={submission.id} className="hover:bg-gray-50 transition-colors">
+                <td className="px-6 py-5 whitespace-nowrap">
                   <div className="flex items-center">
-                    {getStatusIcon(submission.status)}
-                    <div className="ml-3">
-                      <div className="text-sm font-medium text-gray-900">{submission.name}</div>
-                      <div className="text-xs text-gray-500">ID: {submission.id}</div>
+                    <div
+                      className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center 
+                      ${
+                        submission.status === "pending_review"
+                          ? "bg-green-100"
+                          : submission.status === "analyzing"
+                            ? "bg-blue-100"
+                            : "bg-gray-100"
+                      }`}
+                    >
+                      {getStatusIcon(submission.status)}
+                    </div>
+                    <div className="ml-4">
+                      <div className="text-sm font-medium text-gray-900">{submission.id}</div>
+                      <div className="text-sm text-gray-500">{submission.name}</div>
                     </div>
                   </div>
                 </td>
-                <td className="px-6 py-4 whitespace-nowrap">
+                <td className="px-6 py-5 whitespace-nowrap">
                   <span
-                    className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full 
+                    className={`px-3 py-1.5 inline-flex text-sm font-medium rounded-full 
                     ${
-                      submission.status === "completed"
+                      submission.status === "pending_review"
                         ? "bg-green-100 text-green-800"
-                        : submission.status === "processing"
+                        : submission.status === "analyzing"
                           ? "bg-blue-100 text-blue-800"
-                          : submission.status === "failed"
-                            ? "bg-red-100 text-red-800"
-                            : "bg-gray-100 text-gray-800"
+                          : "bg-gray-100 text-gray-800"
                     }`}
                   >
                     {getStatusText(submission.status)}
                   </span>
                 </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                  {formatDate(submission.lastUpdated)}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  {submission.status === "processing" ? (
-                    <div>
-                      <div className="flex items-center justify-between text-xs text-gray-600 mb-1">
-                        <span>Progress</span>
-                        <span>{submission.progress}%</span>
-                      </div>
-                      <div className="w-full bg-gray-200 rounded-full h-2">
-                        <div
-                          className="h-2 rounded-full bg-blue-500"
-                          style={{ width: `${submission.progress}%` }}
-                        ></div>
-                      </div>
-                    </div>
-                  ) : submission.status === "completed" ? (
-                    <span className="text-sm text-gray-500">100% Complete</span>
-                  ) : (
-                    <span className="text-sm text-gray-500">Not started</span>
-                  )}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                  {submission.status === "completed" ? (
+                <td className="px-6 py-5 whitespace-nowrap text-center">
+                  {submission.status === "pending_review" ? (
                     <button
-                      className="text-blue-600 hover:text-blue-900 ml-3"
+                      className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
                       onClick={() => viewDashboard(submission.dashboardId!)}
                     >
-                      View Dashboard
+                      <FileSearch className="w-4 h-4 mr-2" />
+                      <span>Show Report</span>
                     </button>
-                  ) : submission.status === "pending" ? (
+                  ) : submission.status === "pending_analysis" ? (
                     <button
-                      className="flex items-center text-green-600 hover:text-green-900 ml-3"
+                      className="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50"
                       onClick={() => processSubmission(submission.id)}
                       disabled={processingSubmissions[submission.id]}
                     >
                       {processingSubmissions[submission.id] ? (
                         <>
-                          <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                           <span>Processing...</span>
                         </>
                       ) : (
                         <>
-                          <Play className="w-4 h-4 mr-1" />
-                          <span>Process</span>
+                          <Play className="w-4 h-4 mr-2" />
+                          <span>Analyze</span>
                         </>
                       )}
                     </button>
-                  ) : submission.status === "processing" ? (
-                    <span className="text-gray-500">Processing...</span>
+                  ) : submission.status === "analyzing" ? (
+                    <div className="inline-flex items-center px-4 py-2 bg-blue-100 text-blue-800 rounded-md">
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      <span>Analyzing...</span>
+                    </div>
                   ) : (
                     <button
-                      className="text-red-600 hover:text-red-900 ml-3"
+                      className="inline-flex items-center px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50"
                       onClick={() => processSubmission(submission.id)}
                     >
-                      Retry
+                      <RefreshCw className="w-4 h-4 mr-2" />
+                      <span>Retry</span>
                     </button>
                   )}
                 </td>
