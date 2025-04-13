@@ -152,10 +152,9 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            title: dashboard.title,
-            content: content,
-          }),
+          body: JSON.stringify(
+            dashboard
+          ),
         })
 
         if (response.ok) {
@@ -186,7 +185,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
     const contentId = `chart-${tabId}`
 
     return (
-      <div className="h-96 w-full relative">
+      <div className="h-120 w-full relative">
         <div className="absolute top-2 right-2 z-10">
           <FeedbackButton
             contentId={contentId}
@@ -199,33 +198,69 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
 
         <h3 className="text-lg font-semibold mb-4">{title}</h3>
 
-        <ResponsiveContainer width="100%" height="100%">
+
+
+        <ResponsiveContainer width="100%" height={500} className="mx-auto">
           {chartType === "bar" ? (
-            <BarChart data={data}>
+            <BarChart data={data} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis
                 dataKey={Object.keys(data[0]).find(key => key !== "value")}
                 label={{ value: xAxisLabel, position: "insideBottom", offset: -5 }}
               />
-              <YAxis label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }} />
-              <Tooltip />
+              <YAxis
+                label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }}
+                tickFormatter={(value) =>
+                  new Intl.NumberFormat("en", {
+                    notation: "compact",
+                    compactDisplay: "short",
+                  }).format(value)
+                }
+              />
+              <Tooltip
+                formatter={(value) =>
+                  new Intl.NumberFormat("en", {
+                    style: "currency",
+                    currency: "USD",
+                    notation: "compact",
+                    compactDisplay: "short",
+                  }).format(value)
+                }
+              />
               <Legend />
               <Bar dataKey="value" fill="#8884d8" />
             </BarChart>
           ) : chartType === "line" ? (
-            <LineChart data={data}>
+            <LineChart data={data} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis
                 dataKey={Object.keys(data[0]).find(key => key !== "value")}
                 label={{ value: xAxisLabel, position: "insideBottom", offset: -5 }}
               />
-              <YAxis label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }} />
-              <Tooltip />
+              <YAxis
+                label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }}
+                tickFormatter={(value) =>
+                  new Intl.NumberFormat("en", {
+                    notation: "compact",
+                    compactDisplay: "short",
+                  }).format(value)
+                }
+              />
+              <Tooltip
+                formatter={(value) =>
+                  new Intl.NumberFormat("en", {
+                    style: "currency",
+                    currency: "USD",
+                    notation: "compact",
+                    compactDisplay: "short",
+                  }).format(value)
+                }
+              />
               <Legend />
               <Line type="monotone" dataKey="value" stroke="#8884d8" activeDot={{ r: 8 }} />
             </LineChart>
           ) : chartType === "pie" ? (
-            <PieChart>
+            <PieChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
               <Pie
                 data={data}
                 cx="50%"
@@ -241,7 +276,16 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                 ))}
               </Pie>
-              <Tooltip />
+              <Tooltip
+                formatter={(value) =>
+                  new Intl.NumberFormat("en", {
+                    style: "currency",
+                    currency: "USD",
+                    notation: "compact",
+                    compactDisplay: "short",
+                  }).format(value)
+                }
+              />
               <Legend />
             </PieChart>
           ) : (

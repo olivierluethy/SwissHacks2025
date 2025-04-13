@@ -5,7 +5,15 @@ import hashlib
 import asyncio
 from threading import Lock
 
-from fastapi import FastAPI, HTTPException, Path, Body
+import tempfile
+import matplotlib.pyplot as plt
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fpdf import FPDF, HTMLMixin
+from bs4 import BeautifulSoup
+import uvicorn
+
+from fastapi import Path, Body, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
@@ -79,8 +87,6 @@ def save_progress(submission_id: str, data: dict):
 # Serve Static Files for Processed Results and Dashboards
 # -----------------------------
 app.mount("/results", StaticFiles(directory=PROCESSED_DIR), name="results")
-
-# Endpoints declared in other files (RAG functionality)
 app.include_router(data_endpoints.router, prefix="")
 
 
@@ -134,26 +140,21 @@ async def get_dashboard(dashboard_id: str = Path(...)):
 
 @app.post("/dashboards/{dashboard_id}/feedback")
 async def submit_feedback(dashboard_id: str = Path(...), feedback: dict = Body(...)):
-    # For a real application, you would persist the feedback.
+    # For a real application, persist the feedback.
     print(f"Feedback for {dashboard_id}: {feedback}")
     return {"status": "success", "message": "Feedback submitted successfully."}
 
 
 # -----------------------------
-# AI Caching Helpers
+# AI Caching Helpers & AI Query Functions
 # -----------------------------
 def get_cache_filename(query_type: str, input_text: str) -> str:
-    """Generate a cache filename based on query type and input content."""
     key = f"{query_type}_{input_text}"
     hash_key = hashlib.md5(key.encode("utf-8")).hexdigest()
     return os.path.join(AI_CACHED_DIR, f"{hash_key}_{query_type}.json")
 
 
 def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
-    """
-    Check for a cached AI response. If none exists, call the AI API,
-    cache and return the result.
-    """
     cache_file = get_cache_filename(query_type, prompt)
     if os.path.exists(cache_file):
         with open(cache_file, "r") as f:
@@ -165,7 +166,6 @@ def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
             model=MODEL_NAME, messages=[{"role": "user", "content": prompt}]
         )
         content = response.choices[0].message.content
-        # Remove any embedded <think> sections if present.
         cleaned_content = re.sub(
             r"<think>.*?</think>\s*", "", content, flags=re.DOTALL
         ).strip()
@@ -176,12 +176,15 @@ def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
         raise HTTPException(status_code=500, detail=f"Error querying the AI: {e}")
 
 
-# -----------------------------
-# Revised AI Query Functions
-# -----------------------------
 def generate_overview(markdown_text: str, submission_id: str, context: str) -> str:
     prompt = f"""
 You are an expert AI assistant for underwriters. Given the real data provided below, generate an analysis overview that highlights only the most critical and non-obvious risk indicators and key findings. Avoid reiterating common or trivial information. Emphasize aspects of the data that an underwriter must know for decision making.
+
+Context:
+{context}
+
+Markdown input to analyze:
+{markdown_text}
 
 Follow the JSON schema exactly.
 
@@ -197,12 +200,6 @@ JSON Schema:
   }}
 }}
 
-Context:
-{context}
-
-Markdown input to analyze:
-{markdown_text}
-
 Output only valid JSON following the schema.
 """
     return cached_ai_query(prompt, "overview", submission_id)
@@ -211,6 +208,13 @@ Output only valid JSON following the schema.
 def generate_key_insights(markdown_text: str, submission_id: str, context: str) -> str:
     prompt = f"""
 You are an expert in data analysis for underwriting. Analyze the real input data and extract only the most significant, non-obvious insights that affect risk or performance. Avoid repeating common observations; instead, focus on critical trends, anomalies, or risks an underwriter must evaluate.
+
+
+Context:
+{context}
+
+Markdown input to analyze:
+{markdown_text}
 
 Follow the JSON schema exactly.
 
@@ -232,12 +236,6 @@ JSON Schema:
   }}
 }}
 
-Context:
-{context}
-
-Markdown input to analyze:
-{markdown_text}
-
 Return only valid JSON strictly adhering to the schema.
 """
     return cached_ai_query(prompt, "key_insights", submission_id)
@@ -246,6 +244,12 @@ Return only valid JSON strictly adhering to the schema.
 def generate_tabs(markdown_text: str, submission_id: str, context: str) -> str:
     prompt = f"""
 You are an expert data analyst for underwriting reports. Based on the provided data, generate a collection of dashboard tabs that highlight advanced visualizations and analysis. Ensure the output focuses on the most critical data points required for underwriting and avoids stating the obvious.
+
+Context:
+{context}
+
+Markdown input to analyze:
+{markdown_text}
 
 Follow the JSON schema exactly.
 
@@ -302,13 +306,6 @@ JSON Schema:
     }}
   }}
 }}
-
-Context:
-{context}
-
-Markdown input to analyze:
-{markdown_text}
-
 Return only valid JSON following the schema.
 """
     return cached_ai_query(prompt, "tabs", submission_id)
@@ -318,10 +315,6 @@ Return only valid JSON following the schema.
 # Utility: File Reading and JSON Parsing
 # -----------------------------
 def read_all_files_from_folder(folder_name: str) -> str:
-    """
-    Reads all files (ignoring subfolders) in the provided folder and concatenates
-    their contents into a single Markdown string.
-    """
     if not os.path.exists(folder_name):
         raise FileNotFoundError(f"Folder '{folder_name}' does not exist.")
     if not os.path.isdir(folder_name):
@@ -340,10 +333,6 @@ def read_all_files_from_folder(folder_name: str) -> str:
 
 
 def clean_and_parse_json(text: str):
-    """
-    Cleans text by removing markdown code fences and fixing common JSON issues,
-    then attempts to parse the result.
-    """
     text = re.sub(r"```json\s*|```\s*", "", text).strip()
     text = re.sub(r"([{,]\s*)(\w+)(\s*:)", r'\1"\2"\3', text)
     text = re.sub(r':\s*"([^"]*)"([^,\]}])', r': "\1"\2', text)
@@ -357,103 +346,92 @@ def clean_and_parse_json(text: str):
 
 
 # -----------------------------
-# Async Process Submission Endpoint
+# Background Task: Process Submission
 # -----------------------------
-@app.post("/submissions/{submission_id}/process")
-async def process_submission(submission_id: str = Path(...)):
+def process_submission_task(submission_id: str):
     # Initialize progress
-    progress = await asyncio.to_thread(load_progress, submission_id)
-    progress.update({"status": "in_progress", "progress": 0, "results": {}})
-    await asyncio.to_thread(save_progress, submission_id, progress)
+    progress = load_progress(submission_id)
+    progress.update({"status": "processing", "progress": 0, "results": {}})
+    save_progress(submission_id, progress)
 
     submission_folder = os.path.join(SUBMISSIONS_DIR, submission_id)
     if not os.path.exists(submission_folder):
-        raise HTTPException(status_code=404, detail="Submission folder not found")
+        progress["status"] = "failed"
+        save_progress(submission_id, progress)
+        return
 
     try:
-        # Read all files and generate context using RAG helper.
-        markdown_text = await asyncio.to_thread(
-            read_all_files_from_folder, submission_folder
-        )
+        markdown_text = read_all_files_from_folder(submission_folder)
         context = get_top_k_related_files_contents(markdown_text, k=10)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        progress["status"] = "failed"
+        save_progress(submission_id, progress)
+        return
 
     try:
         # Generate Overview (33% progress)
-        overview_json_str = await asyncio.to_thread(
-            generate_overview, markdown_text, submission_id, context
-        )
+        overview_json_str = generate_overview(markdown_text, submission_id, context)
         print("Overview JSON:", overview_json_str)
-        overview = await asyncio.to_thread(clean_and_parse_json, overview_json_str)
+        overview = clean_and_parse_json(overview_json_str)
         progress["results"]["overview"] = overview
         progress["progress"] = 33
-        await asyncio.to_thread(save_progress, submission_id, progress)
+        save_progress(submission_id, progress)
 
         # Generate Key Insights (66% progress)
-        key_insights_json_str = await asyncio.to_thread(
-            generate_key_insights, markdown_text, submission_id, context
+        key_insights_json_str = generate_key_insights(
+            markdown_text, submission_id, context
         )
         print("Key Insights JSON:", key_insights_json_str)
-        key_insights = await asyncio.to_thread(
-            clean_and_parse_json, key_insights_json_str
-        )
+        key_insights = clean_and_parse_json(key_insights_json_str)
         progress["results"]["keyInsights"] = key_insights
         progress["progress"] = 66
-        await asyncio.to_thread(save_progress, submission_id, progress)
+        save_progress(submission_id, progress)
 
         # Generate Tabs (100% progress)
-        tabs_json_str = await asyncio.to_thread(
-            generate_tabs, markdown_text, submission_id, context
-        )
+        tabs_json_str = generate_tabs(markdown_text, submission_id, context)
         print("Tabs JSON:", tabs_json_str)
-        tabs = await asyncio.to_thread(clean_and_parse_json, tabs_json_str)
+        tabs = clean_and_parse_json(tabs_json_str)
         progress["results"]["tabs"] = tabs
         progress["progress"] = 100
         progress["status"] = "completed"
-        await asyncio.to_thread(save_progress, submission_id, progress)
-    except Exception as e:
+        save_progress(submission_id, progress)
+    except Exception:
         progress["status"] = "failed"
-        await asyncio.to_thread(save_progress, submission_id, progress)
-        raise HTTPException(
-            status_code=500, detail=f"Error processing AI responses: {e}"
-        )
+        save_progress(submission_id, progress)
+        return
 
-    # Merge into final result
     final_result = {
         "title": overview.get("title", ""),
         "markdown": overview.get("markdown", ""),
         "keyInsights": key_insights,
         "tabs": tabs,
     }
-
-    # Save final result to processed directory and as a dashboard
     final_result_path = os.path.join(PROCESSED_DIR, f"{submission_id}_result.json")
-    await asyncio.to_thread(
-        lambda: open(final_result_path, "w").write(json.dumps(final_result, indent=2))
-    )
+    with open(final_result_path, "w") as f:
+        f.write(json.dumps(final_result, indent=2))
     dashboard_path = os.path.join(AI_CACHED_DIR, f"{submission_id}_dashboard.json")
-    await asyncio.to_thread(
-        lambda: open(dashboard_path, "w").write(json.dumps(final_result, indent=2))
-    )
+    with open(dashboard_path, "w") as f:
+        f.write(json.dumps(final_result, indent=2))
 
-    return final_result
+
+# -----------------------------
+# Async Process Submission Endpoint (Now Launches a Background Task)
+# -----------------------------
+@app.post("/submissions/{submission_id}/process")
+async def process_submission_endpoint(
+    submission_id: str = Path(...), background_tasks: BackgroundTasks = None
+):
+    # Launch the processing in the background without waiting for it to complete.
+    background_tasks.add_task(process_submission_task, submission_id)
+    return {"submission_id": submission_id, "status": "processing started"}
 
 
 # -----------------------------
 # AI Response to Feedback Endpoint
 # -----------------------------
-
-
 def generate_feedback_response(
     feedback: dict, current_dashboard: dict, context: str, markdown_text: str
 ) -> str:
-    """
-    Given the user feedback, the current dashboard content, the submission context,
-    and the original markdown data, generate a revised dashboard update.
-    The AI should update only the fields targeted by the feedback while leaving
-    unrelated fields unchanged. The output must strictly follow the provided JSON schema.
-    """
     prompt = f"""
 You are an expert AI assistant specialized in generating underwriting reports. Your task is to update only the parts of the dashboard that are directly related to the user feedback while leaving all other sections completely unchanged.
 
@@ -573,54 +551,215 @@ Output a complete updated dashboard in valid JSON, strictly following the schema
 async def get_ai_response_to_feedback(
     dashboard_id: str = Path(...), feedback: dict = Body(...)
 ):
-    # Load the current dashboard.
     dashboard_path = os.path.join(AI_CACHED_DIR, f"{dashboard_id}.json")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Dashboard not found")
     with open(dashboard_path, "r") as f:
         current_dashboard = json.load(f)
 
-    # Load the context and original markdown data.
     submission_id = dashboard_id.split("_")[0]
     submission_folder = os.path.join(SUBMISSIONS_DIR, submission_id)
     if not os.path.exists(submission_folder):
         raise HTTPException(status_code=404, detail="Submission folder not found")
-    markdown_text = await asyncio.to_thread(
-        read_all_files_from_folder, submission_folder
-    )
+    markdown_text = read_all_files_from_folder(submission_folder)
     context = get_top_k_related_files_contents(markdown_text, k=10)
     if not context:
         raise HTTPException(status_code=404, detail="Context not found")
 
     try:
-        updated_response_str = await asyncio.to_thread(
-            generate_feedback_response,
-            feedback,
-            current_dashboard.copy(),
-            context,
-            markdown_text,
+        updated_response_str = generate_feedback_response(
+            feedback, current_dashboard.copy(), context, markdown_text
         )
-        updated_dashboard = await asyncio.to_thread(
-            clean_and_parse_json, updated_response_str
-        )
+        updated_dashboard = clean_and_parse_json(updated_response_str)
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error processing AI feedback: {e}"
         )
 
-    # Save updated dashboard for future retrieval.
-    await asyncio.to_thread(
-        lambda: open(dashboard_path, "w").write(json.dumps(updated_dashboard, indent=2))
-    )
-    # Optionally, update the processed result file as well.
+    with open(dashboard_path, "w") as f:
+        f.write(json.dumps(updated_dashboard, indent=2))
     processed_result_path = os.path.join(PROCESSED_DIR, f"{dashboard_id}_result.json")
-    await asyncio.to_thread(
-        lambda: open(processed_result_path, "w").write(
-            json.dumps(updated_dashboard, indent=2)
-        )
-    )
+    with open(processed_result_path, "w") as f:
+        f.write(json.dumps(updated_dashboard, indent=2))
 
     return updated_dashboard
+
+
+# Extend FPDF to support HTML rendering.
+class PDF(FPDF, HTMLMixin):
+    pass
+
+
+def render_chart(chart_data):
+    """
+    Renders a chart based on chart_data and returns the path of the saved image.
+    """
+    chart_type = chart_data.get("chartType")
+    data_points = chart_data.get("data", [])
+
+    # Extract values and labels from data points.
+    values = [pt.get("value") for pt in data_points]
+    labels = []
+    for pt in data_points:
+        extras = {k: v for k, v in pt.items() if k != "value"}
+        label = next(iter(extras.values())) if extras else ""
+        labels.append(label)
+
+    plt.figure(figsize=(6, 4))
+    plt.title(chart_data.get("title", "Chart"))
+    if chart_type == "bar":
+        plt.bar(labels, values, color="skyblue")
+        plt.xlabel(chart_data.get("xAxisLabel", ""))
+        plt.ylabel(chart_data.get("yAxisLabel", ""))
+    elif chart_type == "line":
+        plt.plot(labels, values, marker="o", linestyle="-", color="green")
+        plt.xlabel(chart_data.get("xAxisLabel", ""))
+        plt.ylabel(chart_data.get("yAxisLabel", ""))
+    elif chart_type == "pie":
+        plt.pie(values, labels=labels, autopct="%1.1f%%")
+    else:
+        plt.text(0.5, 0.5, "Unsupported chart type", ha="center")
+
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    plt.tight_layout()
+    plt.savefig(temp_file.name, format="png")
+    plt.close()
+    return temp_file.name
+
+
+def render_html_to_text(html_content):
+    """
+    Converts HTML content to plain text.
+    """
+    soup = BeautifulSoup(html_content, "html.parser")
+    return soup.get_text(separator="\n")
+
+
+def generate_report(data, output_format="pdf", output_filepath="report"):
+    """
+    Generates a PDF or TXT report from JSON data conforming to the provided schemas.
+
+    Parameters:
+        data (dict): JSON data with keys "overview", "keyInsights", and "tabs".
+        output_format (str): 'pdf' or 'txt'
+        output_filepath (str): Path (without extension) for output file.
+    """
+    report_lines = []
+
+    # Overview Section.
+    report_lines.append(f"=== {data.get('title', 'Overview Report')} ===\n")
+    report_lines.append("Markdown Summary:\n")
+    report_lines.append(data.get("markdown", "No overview markdown provided.") + "\n")
+    print(data)
+
+    # Key Insights Section.
+    key_insights = data.get("keyInsights", [])
+    report_lines.append("=== Key Insights ===\n")
+    if key_insights:
+        for insight in key_insights:
+            report_lines.append(f"* {insight.get('title','No Title')}")
+            report_lines.append(
+                f"  Description: {insight.get('description','No Description')}"
+            )
+            report_lines.append(f"  Impact: {insight.get('impact','N/A')}")
+            report_lines.append(f"  Confidence: {insight.get('confidence',0)}\n")
+    else:
+        report_lines.append("No key insights available.\n")
+
+    # Tabs Section.
+    tabs = data.get("tabs", [])
+    report_lines.append("=== Dashboard Tabs ===\n")
+    for tab in tabs:
+        report_lines.append(f"[{tab.get('id')}] {tab.get('title','No Title')}")
+        content = tab.get("content", {})
+        content_type = content.get("type", "N/A")
+        if content_type == "json":
+            report_lines.append("Chart Content: (Rendered as graph below)")
+        elif content_type == "html":
+            html_plain = render_html_to_text(content.get("data", ""))
+            report_lines.append("HTML Content Rendered:")
+            report_lines.append(html_plain)
+        report_lines.append("")
+
+    report_text = "\n".join(report_lines)
+
+    if output_format.lower() == "txt":
+        output_file = output_filepath + ".txt"
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(report_text)
+        return output_file
+
+    elif output_format.lower() == "pdf":
+        pdf = PDF()
+        pdf.add_page()
+        pdf.add_font("DejaVu", "", "./fonts/DejaVuSerif.ttf", uni=True)
+        pdf.set_font("DejaVu", "", 12)
+        pdf.set_auto_page_break(auto=True, margin=15)
+
+        # Write header report text.
+        for line in report_text.split("\n"):
+            pdf.multi_cell(0, 10, line)
+
+        # Process each tab for rendering charts or HTML.
+        for tab in tabs:
+            content = tab.get("content", {})
+            content_type = content.get("type", "N/A")
+            pdf.ln(10)
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 10, f"Tab: {tab.get('title','No Title')}", ln=True)
+            pdf.set_font("Arial", size=12)
+
+            if content_type == "json":
+                chart_data = content.get("data", {})
+                image_path = render_chart(chart_data)
+                pdf.ln(5)
+                try:
+                    pdf.image(image_path, w=pdf.w / 2)
+                except RuntimeError as e:
+                    pdf.multi_cell(0, 10, f"Error rendering chart: {e}")
+                finally:
+                    os.remove(image_path)
+                pdf.multi_cell(
+                    0, 10, f"Description: {chart_data.get('description', '')}"
+                )
+            elif content_type == "html":
+                html_content = content.get("data", "")
+                pdf.ln(5)
+                try:
+                    pdf.write_html(html_content)
+                except Exception:
+                    plain_text = render_html_to_text(html_content)
+                    pdf.multi_cell(0, 10, plain_text)
+            else:
+                pdf.multi_cell(0, 10, "Unsupported content type.")
+
+        output_file = output_filepath + ".pdf"
+        pdf.output(output_file)
+        return output_file
+    else:
+        raise ValueError("Unsupported output format. Choose 'pdf' or 'txt'.")
+
+
+@app.post("/generate-pdf")
+async def generate_report_endpoint(
+    payload: dict,
+    output_format: str = Query("pdf", description="Output format: 'pdf' or 'txt'"),
+):
+    """
+    Generates a report from JSON payload conforming to the expected schemas.
+    Returns the generated file (PDF or TXT).
+    """
+    # Create a temporary file path for output.
+    temp_dir = tempfile.gettempdir()
+    output_filepath = os.path.join(temp_dir, "report_output")
+    file_path = generate_report(
+        payload, output_format=output_format, output_filepath=output_filepath
+    )
+    # Set the appropriate media_type.
+    media_type = "application/pdf" if output_format.lower() == "pdf" else "text/plain"
+    return FileResponse(
+        path=file_path, media_type=media_type, filename=os.path.basename(file_path)
+    )
 
 
 # -----------------------------
