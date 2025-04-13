@@ -489,6 +489,28 @@ export const aiService = {
       throw error
     }
   },
+
+  deleteChatHistory: async (dashboardId: string) => {
+    try {
+      if (API_MODE === "mock") {
+        // Simulate API delay
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        // Clear mock chat history
+        const updatedChatHistory = mockChatHistory.filter((msg) => msg.role !== "user")
+        // Return success response
+        return Promise.resolve({
+          success: true,
+          message: "Chat history deleted successfully",
+          chatHistory: updatedChatHistory,
+        })
+      }
+      const response = await api.delete(`/dashboards/${dashboardId}/chat`)
+      return response.data
+    } catch (error) {
+      console.error("Error deleting chat history:", error)
+      throw error
+    }
+  }
 }
 
 export default aiService

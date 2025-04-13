@@ -99,7 +99,11 @@ export default function FeedbackButton({
   }
 
   if (feedbackSent) {
-    return <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full">Feedback sent</span>
+    return (
+      <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full">
+        {aiResponseReceived ? "Report updated" : "Updating report..."}
+      </span>
+    )
   }
 
   if (isSubmitting && !feedbackOpen) {

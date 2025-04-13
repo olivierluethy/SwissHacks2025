@@ -500,64 +500,97 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
 
           {message.chart && (
             <div className="mt-4 h-64 w-full">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" className="mx-auto">
                 {message.chart.chartType === "bar" ? (
-                  <BarChart data={message.chart.data}>
+                  <BarChart data={message.chart.data} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
+
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis
-                      dataKey={
-                        message.chart.data[0]?.category
-                          ? "category"
-                          : message.chart.data[0]?.year
-                            ? "year"
-                            : "name"
-                      }
-                      label={{
-                        value: message.chart.xAxisLabel,
-                        position: "insideBottom",
-                        offset: -5,
-                      }}
+                      dataKey={Object.keys(message.chart.data[0]).find(key => key !== "value")}
+                      label={{ value: message.chart.xAxisLabel, position: "insideBottom", offset: -5 }}
                     />
                     <YAxis
-                      label={{
-                        value: message.chart.yAxisLabel,
-                        angle: -90,
-                        position: "insideLeft",
-                      }}
+                      label={{ value: message.chart.yAxisLabel, angle: -90, position: "insideLeft" }}
+                      tickFormatter={(value) =>
+                        new Intl.NumberFormat("en", {
+                          notation: "compact",
+                          compactDisplay: "short",
+                        }).format(value)
+                      }
                     />
-                    <Tooltip />
+                    <Tooltip
+                      formatter={(value) =>
+                        new Intl.NumberFormat("en", {
+                          style: "currency",
+                          currency: "USD",
+                          notation: "compact",
+                          compactDisplay: "short",
+                        }).format(value)
+                      }
+                    />
                     <Legend />
                     <Bar dataKey="value" fill="#8884d8" />
                   </BarChart>
                 ) : message.chart.chartType === "line" ? (
-                  <LineChart data={message.chart.data}>
+                  <LineChart data={message.chart.data} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis
-                      dataKey={message.chart.data[0]?.year ? "year" : "name"}
-                      label={{
-                        value: message.chart.xAxisLabel,
-                        position: "insideBottom",
-                        offset: -5,
-                      }}
+                      dataKey={Object.keys(message.chart.data[0]).find(key => key !== "value")}
+                      label={{ value: message.chart.xAxisLabel, position: "insideBottom", offset: -5 }}
                     />
                     <YAxis
-                      label={{
-                        value: message.chart.yAxisLabel,
-                        angle: -90,
-                        position: "insideLeft",
-                      }}
+                      label={{ value: message.chart.yAxisLabel, angle: -90, position: "insideLeft" }}
+                      tickFormatter={(value) =>
+                        new Intl.NumberFormat("en", {
+                          notation: "compact",
+                          compactDisplay: "short",
+                        }).format(value)
+                      }
                     />
-                    <Tooltip />
+                    <Tooltip
+                      formatter={(value) =>
+                        new Intl.NumberFormat("en", {
+                          style: "currency",
+                          currency: "USD",
+                          notation: "compact",
+                          compactDisplay: "short",
+                        }).format(value)
+                      }
+                    />
                     <Legend />
-                    <Line
-                      type="monotone"
-                      dataKey="value"
-                      stroke="#8884d8"
-                      activeDot={{ r: 8 }}
-                    />
+                    <Line type="monotone" dataKey="value" stroke="#8884d8" activeDot={{ r: 8 }} />
                   </LineChart>
+                ) : message.chart.chartType === "pie" ? (
+                  <PieChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
+                    <Pie
+                      data={message.chart.data}
+                      cx="50%"
+                      cy="50%"
+                      labelLine={false}
+                      label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                      outerRadius={150}
+                      fill="#8884d8"
+                      dataKey="value"
+                      nameKey={Object.keys(message.chart.data[0]).find(key => key !== "value")}
+                    >
+                      {message.chart.data.map((entry: any, index: number) => (
+                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      formatter={(value) =>
+                        new Intl.NumberFormat("en", {
+                          style: "currency",
+                          currency: "USD",
+                          notation: "compact",
+                          compactDisplay: "short",
+                        }).format(value)
+                      }
+                    />
+                    <Legend />
+                  </PieChart>
                 ) : (
-                  <div>Unsupported chart type</div>
+                  <div>Unsupported chart type: {message.chart.chartType}</div>
                 )}
               </ResponsiveContainer>
             </div>
@@ -571,12 +604,42 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
     );
   };
 
+  const deleteHistory = async () => {
+    try {
+      setLoading(true);
+      await aiService.deleteChatHistory(dashboardId);
+      setMessages([]);
+    } catch (err) {
+      console.error("Error deleting chat history:", err);
+      setError("Failed to delete chat history");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div className="flex flex-col h-[600px] border border-gray-200 rounded-lg">
-      <div className="p-4 border-b border-gray-200">
-        <h2 className="text-lg font-semibold">Ask AI About This Submission</h2>
-        <p className="text-sm text-gray-500">Ask questions about the submission data, contract terms, or risk</p>
+
+      <div className="p-4 border-b border-gray-200 flex justify-between items-center">
+        <div>
+          <h2 className="text-lg font-semibold">Ask AI About This Submission</h2>
+          <p className="text-sm text-gray-500">Ask questions about the submission data, contract terms, or risk</p>
+        </div>
+        {messages.length > 0 && (
+          <button
+            onClick={() => {
+              if (confirm("Are you sure you want to clear the chat history?")) {
+                deleteHistory();
+              }
+            }}
+            className="px-3 py-1.5 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md flex items-center"
+          >
+            <X className="w-4 h-4 mr-1" />
+            Clear Chat
+          </button>
+        )}
       </div>
+
 
       <div className="flex-1 overflow-y-auto p-4">
         {loading && messages.length === 0 ? (

@@ -4,6 +4,7 @@ import re
 import hashlib
 import asyncio
 from threading import Lock
+from datetime import datetime
 
 import tempfile
 import matplotlib.pyplot as plt
@@ -145,6 +146,19 @@ async def submit_feedback(dashboard_id: str = Path(...), feedback: dict = Body(.
     return {"status": "success", "message": "Feedback submitted successfully."}
 
 
+@app.delete("/dashboards/{dashboard_id}/chat")
+async def delete_chat_history(dashboard_id: str = Path(...)):
+    """
+    Deletes the chat history for the given dashboard.
+    """
+    chat_file = os.path.join(AI_CACHED_DIR, f"{dashboard_id}_chat.json")
+    if os.path.exists(chat_file):
+        os.remove(chat_file)
+        return {"status": "success", "message": "Chat history deleted."}
+    else:
+        raise HTTPException(status_code=404, detail="Chat history not found.")
+
+
 # -----------------------------
 # AI Caching Helpers & AI Query Functions
 # -----------------------------
@@ -155,6 +169,7 @@ def get_cache_filename(query_type: str, input_text: str) -> str:
 
 
 def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
+    print(f"Querying AI for {query_type} with prompt: {prompt}")
     cache_file = get_cache_filename(query_type, prompt)
     if os.path.exists(cache_file):
         with open(cache_file, "r") as f:
@@ -173,7 +188,188 @@ def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
             json.dump({"response": cleaned_content}, f, indent=2)
         return cleaned_content
     except Exception as e:
+        print(f"Error querying AI: {e}")
         raise HTTPException(status_code=500, detail=f"Error querying the AI: {e}")
+
+
+def generate_chat_response(
+    message: str,
+    dashboard_id: str,
+    markdown_text: str,
+    context: str,
+    chat_history: list,
+) -> str:
+    """
+    Generates a chat response using an AI prompt.
+    If the user's message contains keywords such as "chart", "graph", "visual", or "show",
+    the response will include a nested chart object with structured data.
+    """
+    prompt = f"""You are an expert AI assistant for underwriters. Given the real data provided below, answer the users chat messages to the best of your ability without giving any false data. Avoid reiterating common or trivial information. Emphasize aspects of the data that an underwriter must know for decision making. Never give any false data. Always double-check the numbers and make sure they are correct.
+
+Context:
+{context}
+
+Markdown input to analyze:
+{markdown_text}
+
+Previous chat history:
+{json.dumps(chat_history, indent=2)}
+
+Follow the JSON schema exactly.
+{{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Chat Response Schema",
+  "type": "object",
+  "properties": {{
+    "role": {{
+      "type": "string",
+      "description": "The role of the sender, e.g. 'assistant'"
+    }},
+    "content": {{
+      "type": "string",
+      "description": "The text response of the assistant"
+    }},
+    "timestamp": {{
+      "type": "string",
+      "format": "date-time",
+      "description": "The UTC timestamp of the response in ISO 8601 format"
+    }},
+    "chart": {{
+      "type": "object",
+      "description": "Optional chart object if the request mentions charts or visuals",
+      "properties": {{
+        "chartType": {{
+          "type": "string",
+          "enum": ["bar", "line", "pie"],
+          "description": "The type of the chart"
+        }},
+        "title": {{
+          "type": "string",
+          "description": "Title of the chart"
+        }},
+        "xAxisLabel": {{
+          "type": "string",
+          "description": "Label for the x-axis"
+        }},
+        "yAxisLabel": {{
+          "type": "string",
+          "description": "Label for the y-axis"
+        }},
+        "data": {{
+          "type": "array",
+          "description": "Data points for the chart",
+          "items": {{
+            "type": "object",
+            "properties": {{
+              "category": {{
+                "type": "string",
+                "description": "Category or label for the data point"
+              }},
+              "value": {{
+                "type": "number",
+                "description": "Numerical value for the data point"
+              }}
+            }},
+            "required": ["category", "value"]
+          }}
+        }}
+      }},
+      "required": ["chartType", "title", "xAxisLabel", "yAxisLabel", "data"]
+    }}
+  }},
+  "required": ["role", "content", "timestamp"],
+  "additionalProperties": false
+}}
+
+You are an AI assistant in a chat system. The user has sent the following message:
+"{message}"
+
+If the user’s message does not mention any chart related keywords (such as "chart", "graph", "visual", "show", or "display"), do not include the "chart" key in the JSON.
+
+Output only valid JSON following the structure above (omit comments) and ensure the timestamp is the current UTC time.
+Output only valid JSON following the schema.
+"""
+    # Using the cached_ai_query function to call the AI service.
+    return cached_ai_query(prompt, "chat", dashboard_id)
+
+
+@app.get("/dashboards/{dashboard_id}/chat")
+async def get_chat_history(dashboard_id: str = Path(...)):
+    """
+    Returns the chat history for the given dashboard.
+    """
+    if not os.path.exists(AI_CACHED_DIR):
+        return []
+    chat_history = []
+    chat_file = os.path.join(AI_CACHED_DIR, f"{dashboard_id}_chat.json")
+    if os.path.exists(chat_file):
+        with open(chat_file, "r") as f:
+            chat_history = json.load(f)
+    return chat_history
+
+
+@app.post("/dashboards/{dashboard_id}/chat")
+async def send_chat_message(dashboard_id: str = Path(...), payload: dict = Body(...)):
+    """
+    Accepts a new chat message and generates an AI response.
+    Expects a JSON body with a "message" key.
+    """
+    message_text = payload.get("message", "").strip()
+    if not message_text:
+        raise HTTPException(status_code=400, detail="Message text is required.")
+
+    # Determine the file path for storing the chat history.
+    chat_file = os.path.join(AI_CACHED_DIR, f"{dashboard_id}_chat.json")
+
+    # Load existing chat history from file, or initialize an empty list if the file does not exist.
+    if os.path.exists(chat_file):
+        with open(chat_file, "r") as f:
+            chat_history = json.load(f)
+    else:
+        chat_history = []
+
+    # Create the user message and append it to the chat history.
+    user_message = {
+        "role": "user",
+        "content": message_text,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    chat_history.append(user_message)
+
+    # Read the markdown text and context for the dashboard.
+    submission_id = dashboard_id.split("_")[0]
+    submission_folder = os.path.join(SUBMISSIONS_DIR, submission_id)
+    if not os.path.exists(submission_folder):
+        raise HTTPException(status_code=404, detail="Submission folder not found")
+    markdown_text = read_all_files_from_folder(submission_folder)
+    context = get_top_k_related_files_contents(markdown_text, k=5)
+    context += "\n\n" + get_top_k_related_files_contents(
+        "\n".join([chat["content"] for chat in chat_history]), k=5
+    )
+    if not context:
+        raise HTTPException(status_code=404, detail="Context not found")
+
+    # Generate AI response based on the user message.
+    ai_response_str = generate_chat_response(
+        message_text, dashboard_id, markdown_text, context, chat_history
+    )
+    print("AI Response:", ai_response_str)
+
+    try:
+        ai_response = clean_and_parse_json(ai_response_str)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Invalid JSON from AI response: {e}"
+        )
+
+    # Append the AI response to the chat history.
+    chat_history.append(ai_response)
+
+    # Save the updated chat history back to the file.
+    with open(chat_file, "w") as f:
+        json.dump(chat_history, f, indent=2)
+
+    return ai_response
 
 
 def generate_overview(markdown_text: str, submission_id: str, context: str) -> str:
