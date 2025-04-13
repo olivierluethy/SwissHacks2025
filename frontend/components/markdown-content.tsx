@@ -13,9 +13,10 @@ type TextSelectionPosition = {
 type MarkdownContentProps = {
   content: string
   dashboardId: string
+  onReportUpdated?: (updatedContent: any) => void
 }
 
-export default function MarkdownContent({ content, dashboardId }: MarkdownContentProps) {
+export default function MarkdownContent({ content, dashboardId, onReportUpdated }: MarkdownContentProps) {
   const markdownRef = useRef<HTMLDivElement>(null)
   const selectionFeedbackRef = useRef<HTMLDivElement>(null)
 
@@ -244,6 +245,7 @@ export default function MarkdownContent({ content, dashboardId }: MarkdownConten
                         contentType="heading"
                         dashboardId={dashboardId}
                         onFeedbackSent={() => handleHeadingFeedbackSent(headingId)}
+                        onReportUpdated={onReportUpdated}
                         position="top"
                       />
                     ) : (
@@ -265,6 +267,7 @@ export default function MarkdownContent({ content, dashboardId }: MarkdownConten
                         contentType="heading"
                         dashboardId={dashboardId}
                         onFeedbackSent={() => handleHeadingFeedbackSent(headingId)}
+                        onReportUpdated={onReportUpdated}
                         position="top"
                       />
                     ) : (
@@ -286,6 +289,7 @@ export default function MarkdownContent({ content, dashboardId }: MarkdownConten
                         contentType="heading"
                         dashboardId={dashboardId}
                         onFeedbackSent={() => handleHeadingFeedbackSent(headingId)}
+                        onReportUpdated={onReportUpdated}
                         position="top"
                       />
                     ) : (
@@ -307,6 +311,7 @@ export default function MarkdownContent({ content, dashboardId }: MarkdownConten
                         contentType="heading"
                         dashboardId={dashboardId}
                         onFeedbackSent={() => handleHeadingFeedbackSent(headingId)}
+                        onReportUpdated={onReportUpdated}
                         position="top"
                       />
                     ) : (
@@ -328,6 +333,7 @@ export default function MarkdownContent({ content, dashboardId }: MarkdownConten
                         contentType="heading"
                         dashboardId={dashboardId}
                         onFeedbackSent={() => handleHeadingFeedbackSent(headingId)}
+                        onReportUpdated={onReportUpdated}
                         position="top"
                       />
                     ) : (
@@ -337,6 +343,28 @@ export default function MarkdownContent({ content, dashboardId }: MarkdownConten
                 </h5>
               )
             },
+            strong: ({ node, ...props }) => {
+              const headingId = `heading-${props.children?.toString().toLowerCase().replace(/\s+/g, "-")}`
+              return (
+                <strong {...props} id={headingId} className="group block relative">
+                  {props.children}
+                  <div className="absolute top-1 right-0 hidden group-hover:flex space-x-1">
+                    {!headingFeedbackSent[headingId] ? (
+                      <FeedbackButton
+                        contentId={headingId}
+                        contentType="heading"
+                        dashboardId={dashboardId}
+                        onFeedbackSent={() => handleHeadingFeedbackSent(headingId)}
+                        onReportUpdated={onReportUpdated}
+                        position="top"
+                      />
+                    ) : (
+                      <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full">Feedback sent</span>
+                    )}
+                  </div>
+                </strong>
+              )
+            }
           }}
         >
           {content}

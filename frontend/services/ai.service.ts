@@ -381,6 +381,97 @@ export const aiService = {
       throw error
     }
   },
+  /**
+   * Get AI response to feedback that will modify the report
+   * @param {Object} feedback - Feedback data
+   * @returns {Promise<Object>} Updated content
+   */
+  getAIResponseToFeedback: async (feedback: {
+    dashboardId: string
+    contentId: string
+    contentType: string
+    feedbackText: string
+    isPositive: boolean
+  }) => {
+    try {
+      if (API_MODE === "mock") {
+        // Simulate AI delay
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+
+        // Generate mock updated content based on feedback type
+        let updatedContent = {}
+
+        // Different responses based on content type
+        if (feedback.contentType === "heading") {
+          // Update markdown content for heading feedback
+          const updatedMarkdown = feedback.isPositive
+            ? mockDashboardData.markdown.replace("### Number Table", "### Enhanced Number Table Analysis")
+            : mockDashboardData.markdown.replace(
+              "### Number Table",
+              "### Revised Number Table (Updated based on your feedback)",
+            )
+
+          updatedContent = {
+            markdown: updatedMarkdown,
+          }
+        } else if (feedback.contentType === "insight") {
+          // Update insights for insight feedback
+          const updatedInsights = [...mockDashboardData.keyInsights]
+
+          // Add a new insight based on feedback
+          updatedInsights.push({
+            title: "AI-Generated Insight Based on Your Feedback",
+            description: feedback.isPositive
+              ? "Based on your positive feedback, we've identified additional patterns in the data that support this insight."
+              : "We've revised our analysis based on your feedback and identified potential areas for improvement.",
+            impact: feedback.isPositive ? "positive" : "neutral",
+            confidence: 0.85,
+          })
+
+          updatedContent = {
+            keyInsights: updatedInsights,
+          }
+        } else if (feedback.contentType === "chart") {
+          // For chart feedback, we'll update the tab content
+          updatedContent = {
+            tabs: mockDashboardData.tabs.map((tab) => {
+              if (tab.id === "number-table-analysis" && tab.content.type === "json") {
+                return {
+                  ...tab,
+                  title: "Updated Number Table Analysis",
+                  content: {
+                    ...tab.content,
+                    data: {
+                      ...tab.content.data,
+                      title: "Revised Number Types Distribution (Based on Feedback)",
+                      description: "This visualization has been updated based on your feedback.",
+                    },
+                  },
+                }
+              }
+              return tab
+            }),
+          }
+        } else {
+          // General feedback updates the title and adds a note
+          updatedContent = {
+            title: "AI Data Analysis Overview (Updated)",
+            markdown:
+              mockDashboardData.markdown +
+              "\n\n### AI Response to Your Feedback\nThank you for your feedback. We've updated this report to better address your needs and provide more relevant insights.",
+          }
+        }
+
+        return Promise.resolve(updatedContent)
+      }
+
+      const response = await api.post(`/dashboards/${feedback.dashboardId}/ai-response`, feedback)
+      return response.data
+    } catch (error) {
+      console.error("Error getting AI response to feedback:", error)
+      throw error
+    }
+  },
 }
 
 export default aiService

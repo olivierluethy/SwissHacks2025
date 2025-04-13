@@ -14,9 +14,10 @@ type KeyInsight = {
 type KeyInsightsProps = {
   insights: KeyInsight[]
   dashboardId: string
+  onReportUpdated?: (updatedContent: any) => void
 }
 
-export default function KeyInsights({ insights, dashboardId }: KeyInsightsProps) {
+export default function KeyInsights({ insights, dashboardId, onReportUpdated }: KeyInsightsProps) {
   const [feedbackSentMap, setFeedbackSentMap] = React.useState<Record<string, boolean>>({})
 
   const handleFeedbackSent = (insightIndex: number) => {
@@ -33,7 +34,12 @@ export default function KeyInsights({ insights, dashboardId }: KeyInsightsProps)
       <h2 className="text-xl font-bold mb-4 flex items-center">
         Key Insights
         <div className="ml-2">
-          <FeedbackButton contentId="insights" contentType="insight" dashboardId={dashboardId} />
+          <FeedbackButton
+            contentId="insights"
+            contentType="insight"
+            dashboardId={dashboardId}
+            onReportUpdated={onReportUpdated}
+          />
         </div>
       </h2>
 
@@ -41,23 +47,21 @@ export default function KeyInsights({ insights, dashboardId }: KeyInsightsProps)
         {insights.map((insight, index) => (
           <div
             key={index}
-            className={`p-4 rounded-lg border ${
-              insight.impact === "positive"
-                ? "bg-green-50 border-green-200"
-                : insight.impact === "negative"
-                  ? "bg-red-50 border-red-200"
-                  : "bg-blue-50 border-blue-200"
-            }`}
+            className={`p-4 rounded-lg border ${insight.impact === "positive"
+              ? "bg-green-50 border-green-200"
+              : insight.impact === "negative"
+                ? "bg-red-50 border-red-200"
+                : "bg-blue-50 border-blue-200"
+              }`}
           >
             <div className="flex items-start">
               <div
-                className={`p-2 rounded-full mr-3 ${
-                  insight.impact === "positive"
-                    ? "bg-green-100 text-green-600"
-                    : insight.impact === "negative"
-                      ? "bg-red-100 text-red-600"
-                      : "bg-blue-100 text-blue-600"
-                }`}
+                className={`p-2 rounded-full mr-3 ${insight.impact === "positive"
+                  ? "bg-green-100 text-green-600"
+                  : insight.impact === "negative"
+                    ? "bg-red-100 text-red-600"
+                    : "bg-blue-100 text-blue-600"
+                  }`}
               >
                 {insight.impact === "positive" ? (
                   <CheckCircle className="w-5 h-5" />
@@ -74,13 +78,12 @@ export default function KeyInsights({ insights, dashboardId }: KeyInsightsProps)
                   <div className="text-sm text-gray-500">Confidence: {(insight.confidence * 100).toFixed(0)}%</div>
                   <div className="ml-2 w-24 bg-gray-200 rounded-full h-2">
                     <div
-                      className={`h-2 rounded-full ${
-                        insight.impact === "positive"
-                          ? "bg-green-500"
-                          : insight.impact === "negative"
-                            ? "bg-red-500"
-                            : "bg-blue-500"
-                      }`}
+                      className={`h-2 rounded-full ${insight.impact === "positive"
+                        ? "bg-green-500"
+                        : insight.impact === "negative"
+                          ? "bg-red-500"
+                          : "bg-blue-500"
+                        }`}
                       style={{ width: `${insight.confidence * 100}%` }}
                     ></div>
                   </div>
@@ -92,6 +95,7 @@ export default function KeyInsights({ insights, dashboardId }: KeyInsightsProps)
                   contentType="insight"
                   dashboardId={dashboardId}
                   onFeedbackSent={() => handleFeedbackSent(index)}
+                  onReportUpdated={onReportUpdated}
                 />
               </div>
             </div>
