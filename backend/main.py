@@ -9,8 +9,6 @@ from fastapi import FastAPI, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-from pydantic import BaseModel
 
 # For RAG
 from data import data_endpoints
@@ -77,25 +75,12 @@ def save_progress(submission_id: str, data: dict):
             json.dump(data, f, indent=2)
 
 
-# -----------------------------
-# Serve Static Files for Processed Results and Dashboards
-# -----------------------------
-app = FastAPI(title="File Processing API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Serve processed markdown files as static content (for testing)
 app.mount("/results", StaticFiles(directory=PROCESSED_DIR), name="results")
 
 
 # Endpoints declared in other files
-app.include_router(data_endpoints.router, prefix='')
+app.include_router(data_endpoints.router, prefix="")
 
 
 # -----------------------------
@@ -186,7 +171,7 @@ def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
 # -----------------------------
 # AI Query Functions
 # -----------------------------
-def generate_overview(markdown_text: str, submission_id: str) -> str:
+def generate_overview(markdown_text: str, submission_id: str, context: str) -> str:
     prompt = f"""
 Generate your result following the JSON schema as defined below.
 You must output ONLY valid JSON and nothing else.
@@ -215,7 +200,7 @@ Ensure that you output only JSON following the schema.
     return cached_ai_query(prompt, "overview", submission_id)
 
 
-def generate_key_insights(markdown_text: str, submission_id: str) -> str:
+def generate_key_insights(markdown_text: str, submission_id: str, context: str) -> str:
     prompt = f"""
 Generate your result following the JSON schema as defined below.
 You must output ONLY valid JSON and nothing else.
@@ -250,7 +235,7 @@ Return only a JSON array that strictly adheres to the schema.
     return cached_ai_query(prompt, "key_insights", submission_id)
 
 
-def generate_tabs(markdown_text: str, submission_id: str) -> str:
+def generate_tabs(markdown_text: str, submission_id: str, context: str) -> str:
     prompt = f"""
 Generate your result following the JSON schema as defined below.
 You must output ONLY valid JSON and nothing else.
@@ -357,7 +342,32 @@ def clean_and_parse_json(text: str):
     text = re.sub(r':\s*"([^"]*)"([^,\]}])', r': "\1"\2', text)
     text = re.sub(r",\s*([\]}])", r"\1", text)
     try:
-        markdown_text = read_all_files_from_folder(request.folder_name)
+        return json.loads(text)
+    except Exception as error:
+        print("Error parsing JSON:", error)
+        print("Cleaned text was:", text)
+        raise error
+
+
+# -----------------------------
+# Async Process Submission Endpoint
+# -----------------------------
+@app.post("/submissions/{submission_id}/process")
+async def process_submission(submission_id: str = Path(...)):
+    # Load and update progress asynchronously
+    progress = await asyncio.to_thread(load_progress, submission_id)
+    progress.update({"status": "in_progress", "progress": 0, "results": {}})
+    await asyncio.to_thread(save_progress, submission_id, progress)
+
+    submission_folder = os.path.join(SUBMISSIONS_DIR, submission_id)
+    if not os.path.exists(submission_folder):
+        raise HTTPException(status_code=404, detail="Submission folder not found")
+
+    try:
+        # Read all files (offloaded to a thread)
+        markdown_text = await asyncio.to_thread(
+            read_all_files_from_folder, submission_folder
+        )
         context = get_top_k_related_files_contents(markdown_text, k=10)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -365,7 +375,7 @@ def clean_and_parse_json(text: str):
     try:
         # Generate Overview (update progress to 33%)
         overview_json_str = await asyncio.to_thread(
-            generate_overview, markdown_text, submission_id
+            generate_overview, markdown_text, submission_id, context
         )
         print("Overview JSON:", overview_json_str)
         overview = await asyncio.to_thread(clean_and_parse_json, overview_json_str)
@@ -375,7 +385,7 @@ def clean_and_parse_json(text: str):
 
         # Generate Key Insights (update progress to 66%)
         key_insights_json_str = await asyncio.to_thread(
-            generate_key_insights, markdown_text, submission_id
+            generate_key_insights, markdown_text, submission_id, context
         )
         print("Key Insights JSON:", key_insights_json_str)
         key_insights = await asyncio.to_thread(
@@ -387,7 +397,7 @@ def clean_and_parse_json(text: str):
 
         # Generate Tabs (update progress to 100%)
         tabs_json_str = await asyncio.to_thread(
-            generate_tabs, markdown_text, submission_id
+            generate_tabs, markdown_text, submission_id, context
         )
         print("Tabs JSON:", tabs_json_str)
         tabs = await asyncio.to_thread(clean_and_parse_json, tabs_json_str)
