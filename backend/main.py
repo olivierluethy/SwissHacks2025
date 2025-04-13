@@ -901,9 +901,7 @@ def generate_report(data, output_format="pdf", output_filepath="report"):
             content = tab.get("content", {})
             content_type = content.get("type", "N/A")
             pdf.ln(10)
-            pdf.set_font("Arial", "B", 12)
             pdf.cell(0, 10, f"Tab: {tab.get('title','No Title')}", ln=True)
-            pdf.set_font("Arial", size=12)
 
             if content_type == "json":
                 chart_data = content.get("data", {})
