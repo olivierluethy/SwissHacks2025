@@ -5,9 +5,8 @@ import "./globals.css"
 const inter = Inter({ subsets: ["latin"] })
 
 export const metadata = {
-  title: "ARCHRE - AI-Powered Reinsurance Analytics",
-  description: "Advanced reinsurance analytics platform powered by AI",
-    generator: 'v0.dev'
+  title: "ReInsight - AI-Powered Reinsurance Analytics",
+  description: "Advanced reinsurance analytics platform powered by AI"
 }
 
 export default function RootLayout({
