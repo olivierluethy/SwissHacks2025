@@ -4,6 +4,7 @@ import { useRef, useCallback, useState, useEffect } from "react"
 import ReactMarkdown from "react-markdown"
 import { ThumbsUp, ThumbsDown, MessageCircle, X } from "lucide-react"
 import FeedbackButton from "./feedback-button"
+import { aiService } from "@/services/ai.service"
 
 type TextSelectionPosition = {
   top: number
@@ -26,6 +27,7 @@ export default function MarkdownContent({ content, dashboardId, onReportUpdated 
   const [selectionFeedbackOpen, setSelectionFeedbackOpen] = useState(false)
   const [feedbackText, setFeedbackText] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [currentSentiment, setCurrentSentiment] = useState<boolean | null>(null)
 
   // Heading feedback tracking
   const [headingFeedbackSent, setHeadingFeedbackSent] = useState<Record<string, boolean>>({})
@@ -87,21 +89,37 @@ export default function MarkdownContent({ content, dashboardId, onReportUpdated 
   const handleSelectionFeedback = (isPositive: boolean) => {
     setSelectionFeedbackOpen(true)
     setFeedbackText("")
+    // Store the sentiment value
+    setCurrentSentiment(isPositive)
   }
 
   const submitSelectionFeedback = async (isPositive: boolean) => {
     try {
       setIsSubmitting(true)
 
-      // Simulate AI processing time
-      await new Promise((resolve) => setTimeout(resolve, 1500))
-
-      console.log("Selection feedback submitted:", {
-        selectedText,
+      // Submit feedback to the AI service
+      await aiService.submitFeedback({
+        dashboardId,
+        contentId: `selection-${Date.now()}`,
+        contentType: "text",
         feedbackText,
         isPositive,
-        dashboardId,
+        selectedText,
       })
+
+      // Get AI response to feedback
+      const aiResponse = await aiService.getAIResponseToFeedback({
+        dashboardId,
+        contentId: `selection-${Date.now()}`,
+        contentType: "text",
+        feedbackText,
+        isPositive,
+      })
+
+      // Update the report with AI response
+      if (aiResponse && onReportUpdated) {
+        onReportUpdated(aiResponse)
+      }
 
       // Close the feedback form
       setSelectionFeedbackOpen(false)
@@ -110,7 +128,7 @@ export default function MarkdownContent({ content, dashboardId, onReportUpdated 
       setFeedbackText("")
 
       // Show a success message
-      alert("Thank you for your feedback on the selected text!")
+      alert("Thank you for your feedback! The report has been updated.")
     } catch (error) {
       console.error("Error submitting selection feedback:", error)
       alert("Failed to submit feedback. Please try again.")
@@ -118,7 +136,6 @@ export default function MarkdownContent({ content, dashboardId, onReportUpdated 
       setIsSubmitting(false)
     }
   }
-
   const handleHeadingFeedbackSent = (headingId: string) => {
     setHeadingFeedbackSent((prev) => ({
       ...prev,
@@ -196,30 +213,22 @@ export default function MarkdownContent({ content, dashboardId, onReportUpdated 
             disabled={isSubmitting}
           />
           <div className="flex justify-between">
+
             {isSubmitting ? (
               <div className="flex items-center">
                 <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mr-2"></div>
-                <span className="text-sm text-gray-600">Processing...</span>
+                <span className="text-sm text-gray-600">Updating report...</span>
               </div>
             ) : (
               <div className="flex space-x-2">
                 <button
-                  onClick={() => submitSelectionFeedback(true)}
-                  className="flex items-center px-3 py-1 bg-green-600 text-white rounded-md text-sm"
+                  onClick={() => submitSelectionFeedback(currentSentiment === null ? true : currentSentiment)}
+                  className="flex items-center px-3 py-1 bg-blue-600 text-white rounded-md text-sm"
                 >
-                  <ThumbsUp className="w-3 h-3 mr-1" />
-                  <span>Helpful</span>
-                </button>
-                <button
-                  onClick={() => submitSelectionFeedback(false)}
-                  className="flex items-center px-3 py-1 bg-red-600 text-white rounded-md text-sm"
-                >
-                  <ThumbsDown className="w-3 h-3 mr-1" />
-                  <span>Needs Improvement</span>
+                  <span>Submit Feedback</span>
                 </button>
               </div>
-            )}
-            <button
+            )}            <button
               onClick={() => setSelectionFeedbackOpen(false)}
               className="px-3 py-1 border border-gray-300 text-gray-700 rounded-md text-sm"
               disabled={isSubmitting}

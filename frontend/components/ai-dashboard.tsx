@@ -193,6 +193,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
             contentType="chart"
             dashboardId={dashboardId}
             onFeedbackSent={() => setFeedbackSent((prev) => ({ ...prev, [`chart-${contentId}`]: true }))}
+            onReportUpdated={handleReportUpdate}
           />
         </div>
 
@@ -263,6 +264,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
               contentType="tab"
               dashboardId={dashboardId}
               onFeedbackSent={() => setFeedbackSent((prev) => ({ ...prev, [`tab-${tab.id}`]: true }))}
+              onReportUpdated={handleReportUpdate}
             />
           </div>
           <div dangerouslySetInnerHTML={{ __html: tab.content.data }} />
@@ -304,6 +306,17 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
 
   return (
     <div className="bg-white rounded-lg shadow-sm">
+
+      {reportUpdated && (
+        <div className="bg-green-100 text-green-800 p-4 rounded-t-lg flex justify-between items-center">
+          <span>
+            <strong>Report Updated:</strong> The report has been updated based on your feedback.
+          </span>
+          <button onClick={() => setReportUpdated(false)} className="text-green-800 hover:text-green-900">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+      )}
       <div className="p-4 border-b border-gray-200">
         <div className="flex justify-between items-center mb-4">
           <button className="flex items-center text-sm text-gray-600 hover:text-blue-600" onClick={goBack}>
@@ -323,13 +336,16 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
 
       <div className="p-6">
         {/* Markdown Content with Feedback Option */}
-        <MarkdownContent content={dashboard.markdown} dashboardId={dashboardId} />
+        <MarkdownContent content={dashboard.markdown} dashboardId={dashboardId} onReportUpdated={handleReportUpdate} />
 
         {/* Key Insights Section */}
         {dashboard.keyInsights && dashboard.keyInsights.length > 0 && (
-          <KeyInsights insights={dashboard.keyInsights} dashboardId={dashboardId} />
+          <KeyInsights
+            insights={dashboard.keyInsights}
+            dashboardId={dashboardId}
+            onReportUpdated={handleReportUpdate}
+          />
         )}
-
         {/* Tabs */}
         <div>
           <Tabs value={activeTab} onValueChange={setActiveTab}>

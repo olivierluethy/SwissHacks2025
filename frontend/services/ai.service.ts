@@ -452,6 +452,23 @@ export const aiService = {
               return tab
             }),
           }
+        } else if (feedback.contentType === "text") {
+          // For text selection feedback, update the markdown with a new section
+          const updatedMarkdown =
+            mockDashboardData.markdown +
+            "\n\n### Updated Analysis Based on Your Text Selection\n" +
+            "We've analyzed your feedback on the selected text and have updated our analysis. " +
+            (feedback.isPositive
+              ? "We've expanded on this point with additional supporting data and insights."
+              : "We've revised this section to address your concerns and provide more accurate information.") +
+            "\n\n" +
+            (feedback.selectedText ? `You selected: "${feedback.selectedText}"\n\n` : "") +
+            "Our updated analysis includes more detailed information and addresses the specific points you highlighted in your feedback."
+
+          updatedContent = {
+            markdown: updatedMarkdown,
+            title: mockDashboardData.title + " (Updated)",
+          }
         } else {
           // General feedback updates the title and adds a note
           updatedContent = {

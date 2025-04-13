@@ -455,8 +455,20 @@ def generate_feedback_response(
     unrelated fields unchanged. The output must strictly follow the provided JSON schema.
     """
     prompt = f"""
-You are a highly accurate AI assistant specializing in underwriting reports.
-Below is the current dashboard content as JSON, which includes an overview, key insights, and tabs with detailed data.
+You are an expert AI assistant specialized in generating underwriting reports. Your task is to update only the parts of the dashboard that are directly related to the user feedback while leaving all other sections completely unchanged.
+
+Please follow these instructions precisely:
+1. Output a complete and valid JSON document that follows the original dashboard schema.
+2. Only modify the specific section identified by the feedback's 'contentId' and 'contentType'; do not alter any sections not mentioned in the feedback.
+3. Preserve any content that is unrelated to the feedback.
+4. For the updated section, incorporate the feedback in a way that is data-grounded and reflects only non-trivial improvements.
+5. Do not reiterate or modify any information that is already correct and does not conflict with the feedback.
+6. Ensure that the modifications are consistent with underwriting principles and highlight only critical insights.
+7. Use concise, precise language that eliminates redundant or obvious details.
+8. Ensure that any statistical or numeric data present remains unchanged unless it is explicitly targeted in the feedback.
+9. Provide a clear and improved version of the targeted section that reflects the user's suggestions while keeping all other sections intact.
+10. Do not provide any explanations or commentary; output only the updated JSON.
+11. Double-check that the final output meets all the JSON schema requirements as defined in the original dashboard.
 
 Current Dashboard:
 {json.dumps(current_dashboard, indent=2)}
