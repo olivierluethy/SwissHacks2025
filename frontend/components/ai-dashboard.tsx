@@ -4,7 +4,7 @@ import React, { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { aiService } from "@/services/ai.service"
 import { Tabs, TabsList, Tab, TabsContent } from "@/components/ui/tabs"
-import { AlertTriangle, ArrowLeft, MessageSquare, Download } from "lucide-react"
+import { AlertTriangle, ArrowLeft, MessageSquare, Download, X } from "lucide-react"
 import {
   BarChart,
   Bar,
@@ -64,6 +64,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<string>("")
   const [exportModalOpen, setExportModalOpen] = useState(false)
   const [feedbackSent, setFeedbackSent] = useState<Record<string, boolean>>({})
+  const [reportUpdated, setReportUpdated] = useState(false)
 
   useEffect(() => {
     const fetchDashboard = async () => {
@@ -91,6 +92,26 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
     router.push("/");
   };
 
+
+
+  // Handle report updates from AI feedback
+  const handleReportUpdate = (updatedContent: any) => {
+    if (!dashboard || !updatedContent) return
+
+    // Update the dashboard with the new content
+    setDashboard({
+      ...dashboard,
+      ...updatedContent,
+    })
+
+    // Show a notification that the report was updated
+    setReportUpdated(true)
+
+    // Hide the notification after 5 seconds
+    setTimeout(() => {
+      setReportUpdated(false)
+    }, 5000)
+  }
   // Export functionality
   const exportData = async (format: "pdf" | "text") => {
     try {
@@ -182,7 +203,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
             <BarChart data={data}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis
-                dataKey={data[0]?.category ? "category" : data[0]?.year ? "year" : "name"}
+                dataKey={Object.keys(data[0]).find(key => key !== "value")}
                 label={{ value: xAxisLabel, position: "insideBottom", offset: -5 }}
               />
               <YAxis label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }} />
@@ -194,7 +215,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
             <LineChart data={data}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis
-                dataKey={data[0]?.year ? "year" : "name"}
+                dataKey={Object.keys(data[0]).find(key => key !== "value")}
                 label={{ value: xAxisLabel, position: "insideBottom", offset: -5 }}
               />
               <YAxis label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }} />
@@ -213,6 +234,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
                 outerRadius={150}
                 fill="#8884d8"
                 dataKey="value"
+                nameKey={Object.keys(data[0]).find(key => key !== "value")}
               >
                 {data.map((entry: any, index: number) => (
                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
@@ -409,11 +431,10 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
         className={`mb-4 ${message.role === "user" ? "ml-auto" : "mr-auto"}`}
       >
         <div
-          className={`max-w-3xl rounded-lg p-4 ${
-            message.role === "user"
-              ? "bg-blue-100 text-blue-900"
-              : "bg-gray-100 text-gray-900"
-          }`}
+          className={`max-w-3xl rounded-lg p-4 ${message.role === "user"
+            ? "bg-blue-100 text-blue-900"
+            : "bg-gray-100 text-gray-900"
+            }`}
         >
           <div className="whitespace-pre-wrap">{message.content}</div>
 
@@ -428,8 +449,8 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
                         message.chart.data[0]?.category
                           ? "category"
                           : message.chart.data[0]?.year
-                          ? "year"
-                          : "name"
+                            ? "year"
+                            : "name"
                       }
                       label={{
                         value: message.chart.xAxisLabel,

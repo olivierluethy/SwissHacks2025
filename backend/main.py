@@ -5,12 +5,12 @@ import hashlib
 import asyncio
 from threading import Lock
 
-from fastapi import FastAPI, HTTPException, Path
+from fastapi import FastAPI, HTTPException, Path, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 
-# For RAG
+# For RAG (retrieval augmented generation)
 from data import data_endpoints
 from data.data_endpoints import get_top_k_related_files_contents
 
@@ -18,7 +18,7 @@ from data.data_endpoints import get_top_k_related_files_contents
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 MODEL_NAME = "o3-mini"  # Or "gpt-4" if desired
 
-app = FastAPI(title="Async File Processing API with AI Caching and Progress")
+app = FastAPI(title="Async File Processing API with AI Caching, Feedback & Progress")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -49,7 +49,7 @@ for folder in [
 ]:
     os.makedirs(folder, exist_ok=True)
 
-# Lock for progress file writes
+# Lock for file writes
 progress_lock = Lock()
 
 
@@ -75,11 +75,12 @@ def save_progress(submission_id: str, data: dict):
             json.dump(data, f, indent=2)
 
 
-# Serve processed markdown files as static content (for testing)
+# -----------------------------
+# Serve Static Files for Processed Results and Dashboards
+# -----------------------------
 app.mount("/results", StaticFiles(directory=PROCESSED_DIR), name="results")
 
-
-# Endpoints declared in other files
+# Endpoints declared in other files (RAG functionality)
 app.include_router(data_endpoints.router, prefix="")
 
 
@@ -131,6 +132,13 @@ async def get_dashboard(dashboard_id: str = Path(...)):
     return dashboard_data
 
 
+@app.post("/dashboards/{dashboard_id}/feedback")
+async def submit_feedback(dashboard_id: str = Path(...), feedback: dict = Body(...)):
+    # For a real application, you would persist the feedback.
+    print(f"Feedback for {dashboard_id}: {feedback}")
+    return {"status": "success", "message": "Feedback submitted successfully."}
+
+
 # -----------------------------
 # AI Caching Helpers
 # -----------------------------
@@ -143,8 +151,8 @@ def get_cache_filename(query_type: str, input_text: str) -> str:
 
 def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
     """
-    Check if a cached AI response exists for the prompt and query type.
-    If so, return it; otherwise, call the AI API, cache and return the result.
+    Check for a cached AI response. If none exists, call the AI API,
+    cache and return the result.
     """
     cache_file = get_cache_filename(query_type, prompt)
     if os.path.exists(cache_file):
@@ -157,7 +165,7 @@ def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
             model=MODEL_NAME, messages=[{"role": "user", "content": prompt}]
         )
         content = response.choices[0].message.content
-        # Clean up any <think> blocks if present
+        # Remove any embedded <think> sections if present.
         cleaned_content = re.sub(
             r"<think>.*?</think>\s*", "", content, flags=re.DOTALL
         ).strip()
@@ -169,15 +177,15 @@ def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
 
 
 # -----------------------------
-# AI Query Functions
+# Revised AI Query Functions
 # -----------------------------
 def generate_overview(markdown_text: str, submission_id: str, context: str) -> str:
     prompt = f"""
-Generate your result following the JSON schema as defined below.
-You must output ONLY valid JSON and nothing else.
-You are only providing the overview: a 'title' and a Markdown 'summary'.
+You are an expert AI assistant for underwriters. Given the real data provided below, generate an analysis overview that highlights only the most critical and non-obvious risk indicators and key findings. Avoid reiterating common or trivial information. Emphasize aspects of the data that an underwriter must know for decision making.
 
-JSON Schema for this part:
+Follow the JSON schema exactly.
+
+JSON Schema:
 {{
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "AI Overview Schema",
@@ -185,28 +193,28 @@ JSON Schema for this part:
   "required": ["title", "markdown"],
   "properties": {{
     "title": {{"type": "string", "description": "The main title of the analysis report"}},
-    "markdown": {{"type": "string", "description": "Markdown-formatted summary of the analysis"}}
+    "markdown": {{"type": "string", "description": "Markdown-formatted summary focusing on critical non-obvious insights"}}
   }}
 }}
 
-Use the following context:
+Context:
 {context}
 
 Markdown input to analyze:
 {markdown_text}
 
-Ensure that you output only JSON following the schema.
+Output only valid JSON following the schema.
 """
     return cached_ai_query(prompt, "overview", submission_id)
 
 
 def generate_key_insights(markdown_text: str, submission_id: str, context: str) -> str:
     prompt = f"""
-Generate your result following the JSON schema as defined below.
-You must output ONLY valid JSON and nothing else.
-You are only providing the keyInsights array.
+You are an expert in data analysis for underwriting. Analyze the real input data and extract only the most significant, non-obvious insights that affect risk or performance. Avoid repeating common observations; instead, focus on critical trends, anomalies, or risks an underwriter must evaluate.
 
-JSON Schema for keyInsights:
+Follow the JSON schema exactly.
+
+JSON Schema:
 {{
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Key Insights Schema",
@@ -216,50 +224,50 @@ JSON Schema for keyInsights:
     "type": "object",
     "required": ["title", "description", "impact", "confidence"],
     "properties": {{
-      "title": {{"type": "string", "description": "Short title or headline summarizing the insight"}},
-      "description": {{"type": "string", "description": "Detailed explanation of the insight"}},
-      "impact": {{"type": "string", "enum": ["positive", "negative"], "description": "Indicates whether the insight has a positive or negative effect on risk or performance"}},
-      "confidence": {{"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence score between 0 and 1 indicating the reliability of the insight"}}
+      "title": {{"type": "string", "description": "Insight headline"}},
+      "description": {{"type": "string", "description": "Detailed explanation emphasizing non-obvious critical data points"}},
+      "impact": {{"type": "string", "enum": ["positive", "negative"], "description": "Overall effect on risk/performance"}},
+      "confidence": {{"type": "number", "minimum": 0, "maximum": 1, "description": "Reliability score"}}
     }}
   }}
 }}
 
-Use the following context:
+Context:
 {context}
 
 Markdown input to analyze:
 {markdown_text}
 
-Return only a JSON array that strictly adheres to the schema.
+Return only valid JSON strictly adhering to the schema.
 """
     return cached_ai_query(prompt, "key_insights", submission_id)
 
 
 def generate_tabs(markdown_text: str, submission_id: str, context: str) -> str:
     prompt = f"""
-Generate your result following the JSON schema as defined below.
-You must output ONLY valid JSON and nothing else.
-You are only providing the tabs array.
+You are an expert data analyst for underwriting reports. Based on the provided data, generate a collection of dashboard tabs that highlight advanced visualizations and analysis. Ensure the output focuses on the most critical data points required for underwriting and avoids stating the obvious.
 
-JSON Schema for tabs:
+Follow the JSON schema exactly.
+
+JSON Schema:
 {{
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Tabs Schema",
   "type": "array",
-  "description": "Different sections of the report, each representing a major analytical focus area",
+  "description": "Dashboard tabs representing major analytical focus areas",
   "items": {{
     "type": "object",
     "required": ["id", "title", "content"],
     "properties": {{
-      "id": {{"type": "string", "description": "Unique identifier for the tab"}},
-      "title": {{"type": "string", "description": "Title of the tab shown in the UI"}},
+      "id": {{"type": "string", "description": "Unique tab identifier"}},
+      "title": {{"type": "string", "description": "Tab title for the UI"}},
       "content": {{
         "type": "object",
         "required": ["type", "data"],
         "properties": {{
-          "type": {{"type": "string", "enum": ["json", "html"], "description": "The format of the content: either a JSON chart or an HTML table/summary"}},
+          "type": {{"type": "string", "enum": ["json", "html"], "description": "Format of the content"}},
           "data": {{
-            "description": "Chart or HTML content depending on the specified type",
+            "description": "Content details which could be a JSON chart or HTML summary",
             "oneOf": [
               {{
                 "type": "object",
@@ -275,7 +283,7 @@ JSON Schema for tabs:
                     "items": {{
                       "type": "object",
                       "properties": {{
-                        "value": {{"type": "number", "description": "Numerical value of the data point"}}
+                        "value": {{"type": "number", "description": "Numerical value"}}
                       }},
                       "required": ["value"],
                       "minProperties": 2
@@ -285,7 +293,7 @@ JSON Schema for tabs:
               }},
               {{
                 "type": "string",
-                "description": "HTML string containing formatted report content or tables"
+                "description": "HTML formatted content"
               }}
             ]
           }}
@@ -295,19 +303,19 @@ JSON Schema for tabs:
   }}
 }}
 
-Use the following context:
+Context:
 {context}
 
 Markdown input to analyze:
 {markdown_text}
 
-Return only a JSON array that strictly adheres to the schema.
+Return only valid JSON following the schema.
 """
     return cached_ai_query(prompt, "tabs", submission_id)
 
 
 # -----------------------------
-# Utility: Read Files from Folder (Blocking)
+# Utility: File Reading and JSON Parsing
 # -----------------------------
 def read_all_files_from_folder(folder_name: str) -> str:
     """
@@ -325,8 +333,7 @@ def read_all_files_from_folder(folder_name: str) -> str:
         if os.path.isfile(file_path):
             try:
                 with open(file_path, encoding="utf8") as f:
-                    file_contents = f.read()
-                    combined_text += file_contents + "\n\n"
+                    combined_text += f.read() + "\n\n"
             except Exception as e:
                 raise Exception(f"Error reading file {file_path}: {e}")
     return combined_text.strip()
@@ -334,8 +341,8 @@ def read_all_files_from_folder(folder_name: str) -> str:
 
 def clean_and_parse_json(text: str):
     """
-    Cleans the text by removing markdown code fences and applying regex fixes
-    for common JSON errors, then attempts to parse it.
+    Cleans text by removing markdown code fences and fixing common JSON issues,
+    then attempts to parse the result.
     """
     text = re.sub(r"```json\s*|```\s*", "", text).strip()
     text = re.sub(r"([{,]\s*)(\w+)(\s*:)", r'\1"\2"\3', text)
@@ -354,7 +361,7 @@ def clean_and_parse_json(text: str):
 # -----------------------------
 @app.post("/submissions/{submission_id}/process")
 async def process_submission(submission_id: str = Path(...)):
-    # Load and update progress asynchronously
+    # Initialize progress
     progress = await asyncio.to_thread(load_progress, submission_id)
     progress.update({"status": "in_progress", "progress": 0, "results": {}})
     await asyncio.to_thread(save_progress, submission_id, progress)
@@ -364,7 +371,7 @@ async def process_submission(submission_id: str = Path(...)):
         raise HTTPException(status_code=404, detail="Submission folder not found")
 
     try:
-        # Read all files (offloaded to a thread)
+        # Read all files and generate context using RAG helper.
         markdown_text = await asyncio.to_thread(
             read_all_files_from_folder, submission_folder
         )
@@ -373,7 +380,7 @@ async def process_submission(submission_id: str = Path(...)):
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        # Generate Overview (update progress to 33%)
+        # Generate Overview (33% progress)
         overview_json_str = await asyncio.to_thread(
             generate_overview, markdown_text, submission_id, context
         )
@@ -383,7 +390,7 @@ async def process_submission(submission_id: str = Path(...)):
         progress["progress"] = 33
         await asyncio.to_thread(save_progress, submission_id, progress)
 
-        # Generate Key Insights (update progress to 66%)
+        # Generate Key Insights (66% progress)
         key_insights_json_str = await asyncio.to_thread(
             generate_key_insights, markdown_text, submission_id, context
         )
@@ -395,7 +402,7 @@ async def process_submission(submission_id: str = Path(...)):
         progress["progress"] = 66
         await asyncio.to_thread(save_progress, submission_id, progress)
 
-        # Generate Tabs (update progress to 100%)
+        # Generate Tabs (100% progress)
         tabs_json_str = await asyncio.to_thread(
             generate_tabs, markdown_text, submission_id, context
         )
@@ -412,7 +419,7 @@ async def process_submission(submission_id: str = Path(...)):
             status_code=500, detail=f"Error processing AI responses: {e}"
         )
 
-    # Merge parts into the final result schema
+    # Merge into final result
     final_result = {
         "title": overview.get("title", ""),
         "markdown": overview.get("markdown", ""),
@@ -420,19 +427,188 @@ async def process_submission(submission_id: str = Path(...)):
         "tabs": tabs,
     }
 
-    # Save final result for external reference (as processed result)
+    # Save final result to processed directory and as a dashboard
     final_result_path = os.path.join(PROCESSED_DIR, f"{submission_id}_result.json")
     await asyncio.to_thread(
         lambda: open(final_result_path, "w").write(json.dumps(final_result, indent=2))
     )
-
-    # Also, save the dashboard result for retrieval by the dashboards endpoint
     dashboard_path = os.path.join(AI_CACHED_DIR, f"{submission_id}_dashboard.json")
     await asyncio.to_thread(
         lambda: open(dashboard_path, "w").write(json.dumps(final_result, indent=2))
     )
 
     return final_result
+
+
+# -----------------------------
+# AI Response to Feedback Endpoint
+# -----------------------------
+
+
+def generate_feedback_response(
+    feedback: dict, current_dashboard: dict, context: str, markdown_text: str
+) -> str:
+    """
+    Given the user feedback, the current dashboard content, the submission context,
+    and the original markdown data, generate a revised dashboard update.
+    The AI should update only the fields targeted by the feedback while leaving
+    unrelated fields unchanged. The output must strictly follow the provided JSON schema.
+    """
+    prompt = f"""
+You are a highly accurate AI assistant specializing in underwriting reports.
+Below is the current dashboard content as JSON, which includes an overview, key insights, and tabs with detailed data.
+
+Current Dashboard:
+{json.dumps(current_dashboard, indent=2)}
+
+Submission Context:
+{context}
+
+Original Markdown Data:
+{markdown_text}
+
+User Feedback:
+{json.dumps(feedback, indent=2)}
+
+Task:
+Based on the above information, update only the relevant parts of the dashboard content according to the feedback. Do not modify any data that is not impacted by the feedback. Focus on the critical, non-obvious data points that an underwriter must know, and avoid reiterating trivial or obvious information.
+Follow the JSON schema exactly.
+
+JSON Schema:
+{{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Updated Dashboard Schema",
+  "type": "object",
+  "required": ["title", "markdown", "keyInsights", "tabs"],
+  "properties": {{
+    "title": {{"type": "string", "description": "The main title of the analysis report"}},
+    "markdown": {{"type": "string", "description": "Markdown-formatted summary focusing on critical non-obvious insights"}},
+    "keyInsights": {{
+      "type": "array",
+      "description": "A list of important insights derived from the data analysis",
+      "items": {{
+        "type": "object",
+        "required": ["title", "description", "impact", "confidence"],
+        "properties": {{
+          "title": {{"type": "string", "description": "Insight headline"}},
+          "description": {{"type": "string", "description": "Detailed explanation emphasizing non-obvious critical data points"}},
+          "impact": {{"type": "string", "enum": ["positive", "negative"], "description": "Overall effect on risk/performance"}},
+          "confidence": {{"type": "number", "minimum": 0, "maximum": 1, "description": "Reliability score"}}
+        }}
+      }}
+    }},
+    "tabs": {{
+      "type": "array",
+      "description": "Dashboard tabs representing major analytical focus areas",
+      "items": {{
+        "type": "object",
+        "required": ["id", "title", "content"],
+        "properties": {{
+          "id": {{"type": "string", "description": "Unique tab identifier"}},
+          "title": {{"type": "string", "description": "Tab title for the UI"}},
+          "content": {{
+            "type": "object",
+            "required": ["type", "data"],
+            "properties": {{
+              "type": {{"type": "string", "enum": ["json", "html"], "description": "Format of the content"}},
+              "data": {{
+                "description": "Content details which could be a JSON chart or HTML summary",
+                "oneOf": [
+                  {{
+                    "type": "object",
+                    "required": ["chartType", "title", "description", "data"],
+                    "properties": {{
+                      "chartType": {{"type": "string", "enum": ["bar", "line", "pie"]}},
+                      "title": {{"type": "string"}},
+                      "description": {{"type": "string"}},
+                      "xAxisLabel": {{"type": "string"}},
+                      "yAxisLabel": {{"type": "string"}},
+                      "data": {{
+                        "type": "array",
+                        "items": {{
+                          "type": "object",
+                          "properties": {{
+                            "value": {{"type": "number", "description": "Numerical value"}}
+                          }},
+                          "required": ["value"],
+                          "minProperties": 2
+                        }}
+                      }}
+                    }}
+                  }},
+                  {{
+                    "type": "string",
+                    "description": "HTML formatted content"
+                  }}
+                ]
+              }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+
+Output a complete updated dashboard in valid JSON, strictly following the schema, while only changing the fields that are impacted by the feedback.
+"""
+    return cached_ai_query(
+        prompt, "feedback_response", current_dashboard.get("title", "feedback")
+    )
+
+
+@app.post("/dashboards/{dashboard_id}/ai-response")
+async def get_ai_response_to_feedback(
+    dashboard_id: str = Path(...), feedback: dict = Body(...)
+):
+    # Load the current dashboard.
+    dashboard_path = os.path.join(AI_CACHED_DIR, f"{dashboard_id}.json")
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    with open(dashboard_path, "r") as f:
+        current_dashboard = json.load(f)
+
+    # Load the context and original markdown data.
+    submission_id = dashboard_id.split("_")[0]
+    submission_folder = os.path.join(SUBMISSIONS_DIR, submission_id)
+    if not os.path.exists(submission_folder):
+        raise HTTPException(status_code=404, detail="Submission folder not found")
+    markdown_text = await asyncio.to_thread(
+        read_all_files_from_folder, submission_folder
+    )
+    context = get_top_k_related_files_contents(markdown_text, k=10)
+    if not context:
+        raise HTTPException(status_code=404, detail="Context not found")
+
+    try:
+        updated_response_str = await asyncio.to_thread(
+            generate_feedback_response,
+            feedback,
+            current_dashboard.copy(),
+            context,
+            markdown_text,
+        )
+        updated_dashboard = await asyncio.to_thread(
+            clean_and_parse_json, updated_response_str
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error processing AI feedback: {e}"
+        )
+
+    # Save updated dashboard for future retrieval.
+    await asyncio.to_thread(
+        lambda: open(dashboard_path, "w").write(json.dumps(updated_dashboard, indent=2))
+    )
+    # Optionally, update the processed result file as well.
+    processed_result_path = os.path.join(PROCESSED_DIR, f"{dashboard_id}_result.json")
+    await asyncio.to_thread(
+        lambda: open(processed_result_path, "w").write(
+            json.dumps(updated_dashboard, indent=2)
+        )
+    )
+
+    return updated_dashboard
 
 
 # -----------------------------

@@ -9,6 +9,7 @@ type FeedbackButtonProps = {
   contentType: "heading" | "insight" | "chart" | "text" | "tab"
   dashboardId: string
   onFeedbackSent?: () => void
+  onReportUpdated?: (updatedContent: any) => void
   className?: string
   position?: "right" | "top" // Position of the feedback form
 }
@@ -18,6 +19,7 @@ export default function FeedbackButton({
   contentType,
   dashboardId,
   onFeedbackSent,
+  onReportUpdated,
   className = "",
   position = "right",
 }: FeedbackButtonProps) {
@@ -25,6 +27,7 @@ export default function FeedbackButton({
   const [feedbackText, setFeedbackText] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [feedbackSent, setFeedbackSent] = useState(false)
+  const [aiResponseReceived, setAiResponseReceived] = useState(false)
   const feedbackRef = useRef<HTMLDivElement>(null)
   // Add state to track the current sentiment
   const [currentSentiment, setCurrentSentiment] = useState<boolean | null>(null)
@@ -53,16 +56,13 @@ export default function FeedbackButton({
     try {
       setIsSubmitting(true)
 
-      // Simulate AI processing time
-      await new Promise((resolve) => setTimeout(resolve, 1500))
-
-      // In a real app, you would send this feedback to your backend
+      // Submit feedback
       await aiService.submitFeedback({
         dashboardId,
         contentId,
         contentType,
         feedbackText,
-        isPositive: currentSentiment!, // Use the stored sentiment
+        isPositive: currentSentiment!,
       })
 
       // Mark this content as having received feedback
@@ -73,6 +73,23 @@ export default function FeedbackButton({
       if (onFeedbackSent) {
         onFeedbackSent()
       }
+
+      // Get AI response to feedback and update the report
+      setAiResponseReceived(false)
+      const aiResponse = await aiService.getAIResponseToFeedback({
+        dashboardId,
+        contentId,
+        contentType,
+        feedbackText,
+        isPositive: currentSentiment!,
+      })
+
+      // Update the report with AI response
+      if (aiResponse && onReportUpdated) {
+        onReportUpdated(aiResponse)
+      }
+
+      setAiResponseReceived(true)
     } catch (error) {
       console.error("Error submitting feedback:", error)
       alert("Failed to submit feedback. Please try again.")
@@ -133,9 +150,8 @@ export default function FeedbackButton({
       {feedbackOpen && (
         <div
           ref={feedbackRef}
-          className={`absolute z-20 bg-white shadow-lg rounded-lg p-4 w-64 border border-gray-200 ${
-            position === "right" ? "top-0 right-8" : "top-6 right-0"
-          }`}
+          className={`absolute z-20 bg-white shadow-lg rounded-lg p-4 w-64 border border-gray-200 ${position === "right" ? "top-0 right-8" : "top-6 right-0"
+            }`}
         >
           <div className="flex justify-between items-center mb-2">
             <h4 className="font-medium">
