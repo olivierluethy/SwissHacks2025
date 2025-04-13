@@ -114,9 +114,9 @@ def get_top_k_related_files_contents(input_text: str, k: int = 5) -> str:
     # Read and concatenate file contents
     combined_content = ""
     for filename in top_filenames:
-        file_path = BASE_FOLDER / filename
+        file_path = BASE_FOLDER / filename.replace("\\","/")
         if not file_path.exists() or not file_path.is_file():
-            raise FileNotFoundError(f"File not found: {filename}")
+            raise FileNotFoundError(f"File not found: {file_path}")
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 combined_content += f"\n\n--------------------------\n--- {filename} ---\n"
