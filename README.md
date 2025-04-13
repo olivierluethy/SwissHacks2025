@@ -9,6 +9,17 @@ How to use and deploy the FastAPI-based Excel Subtable Extractor API, as well as
 
 This FastAPI application extracts subtables from Excel (`.xlsx`) files and returns them in Markdown or HTML format. It uses a smart breadth-first search (BFS) algorithm to detect tables, handling merged cells, titles, and footers intelligently.
 
+
+# Getting started (backend & frontend)
+cd backend
+pip install -r requirements.txt # Install requirements. Recommended to do it in a venv
+python main.py
+--------------
+cd frontend
+npm i
+npm run dev
+
+
 ## Table of Contents
 - [Features](#features)
 - [How It Works](#how-it-works)
