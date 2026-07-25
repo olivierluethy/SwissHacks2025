@@ -3,8 +3,10 @@ import json
 import re
 import hashlib
 import asyncio
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
-from datetime import datetime
+from datetime import datetime, timezone
 
 import tempfile
 import matplotlib.pyplot as plt
@@ -23,17 +25,32 @@ from openai import OpenAI
 from data import data_endpoints
 from data.data_endpoints import get_top_k_related_files_contents
 
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
+logger = logging.getLogger("archre")
+
 # Set your OpenAI API key (ensure this key is available in your environment)
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 MODEL_NAME = "o3-mini"  # Or "gpt-4" if desired
 
+# SEC-003: never reflect an arbitrary Origin back with credentials enabled.
+CORS_ALLOW_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CORS_ALLOW_ORIGINS", "http://localhost:3000"
+    ).split(",")
+    if origin.strip()
+]
+
 app = FastAPI(title="Async File Processing API with AI Caching, Feedback & Progress")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOW_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # -----------------------------
@@ -46,6 +63,7 @@ ANALYSIS_DIR = "analysis"
 AI_CACHED_DIR = "data/ai_cached"  # Cache AI results and dashboards
 PROGRESS_DIR = "data/progress"  # Persist progress per submission
 SUBMISSIONS_DIR = "data/submissions_processed"  # Processed submissions
+FEEDBACK_DIR = "data/feedback"  # Persisted user feedback (BUG-019)
 
 for folder in [
     UPLOAD_DIR,
@@ -55,11 +73,26 @@ for folder in [
     AI_CACHED_DIR,
     SUBMISSIONS_DIR,
     PROGRESS_DIR,
+    FEEDBACK_DIR,
 ]:
     os.makedirs(folder, exist_ok=True)
 
 # Lock for file writes
 progress_lock = Lock()
+
+_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_id(value: str) -> str:
+    """Reduce an id to characters that cannot escape a directory.
+
+    Path parameters cannot contain '/' after routing, but ids are used to build
+    filenames in several places; this makes that safe by construction.
+    """
+    cleaned = _SAFE_ID_RE.sub("_", value).lstrip(".")
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Invalid identifier")
+    return cleaned
 
 
 # -----------------------------
@@ -91,29 +124,44 @@ app.mount("/results", StaticFiles(directory=PROCESSED_DIR), name="results")
 app.include_router(data_endpoints.router, prefix="")
 
 
+@app.on_event("startup")
+def _warmup_retrieval():
+    """IMP-002: build the embedding index and load the encoder once, at boot,
+    instead of on every request."""
+    try:
+        data_endpoints.warmup()
+    except Exception as e:  # non-fatal: retrieval endpoints will report it
+        logger.error("retrieval.warmup_failed error=%s", e)
+
+
 # -----------------------------
 # Submission Endpoints
 # -----------------------------
 @app.get("/submissions")
 async def list_submissions():
     submissions = []
-    for fname in os.listdir(SUBMISSIONS_DIR):
+    for fname in sorted(os.listdir(SUBMISSIONS_DIR)):
         submission_path = os.path.join(SUBMISSIONS_DIR, fname)
-        if os.path.isdir(submission_path):
-            if os.path.exists(get_progress_path(fname)):
-                progress = await asyncio.to_thread(load_progress, fname)
-                if progress.get("status") == "completed":
-                    submissions.append(
-                        {
-                            "id": fname,
-                            "status": "completed",
-                            "dashboardId": fname + "_dashboard",
-                        }
-                    )
-                else:
-                    submissions.append({"id": fname, "status": "pending"})
-            else:
-                submissions.append({"id": fname})
+        if not os.path.isdir(submission_path):
+            continue
+
+        if not os.path.exists(get_progress_path(fname)):
+            submissions.append({"id": fname, "status": "pending", "progress": 0})
+            continue
+
+        # BUG-007: report the real state. Collapsing 'processing' and 'failed'
+        # into 'pending' made failures indistinguishable from never-started runs.
+        progress = await asyncio.to_thread(load_progress, fname)
+        entry = {
+            "id": fname,
+            "status": progress.get("status", "pending"),
+            "progress": progress.get("progress", 0),
+        }
+        if entry["status"] == "completed":
+            entry["dashboardId"] = fname + "_dashboard"
+        if progress.get("error"):
+            entry["error"] = progress["error"]
+        submissions.append(entry)
     return submissions
 
 
@@ -126,6 +174,7 @@ async def get_submission_status(submission_id: str = Path(...)):
         "status": progress.get("status", "pending"),
         "progress": progress.get("progress", 0),
         "dashboardId": submission_id + "_dashboard",
+        "error": progress.get("error"),
     }
 
 
@@ -141,8 +190,23 @@ async def get_dashboard(dashboard_id: str = Path(...)):
 
 @app.post("/dashboards/{dashboard_id}/feedback")
 async def submit_feedback(dashboard_id: str = Path(...), feedback: dict = Body(...)):
-    # For a real application, persist the feedback.
-    print(f"Feedback for {dashboard_id}: {feedback}")
+    """BUG-019: feedback used to be print()ed and discarded. It is now appended
+    to a per-dashboard JSONL file so it can actually be reviewed."""
+    record = {
+        "dashboardId": dashboard_id,
+        "receivedAt": datetime.now(timezone.utc).isoformat(),
+        **{k: v for k, v in feedback.items() if k != "dashboardId"},
+    }
+    feedback_path = os.path.join(FEEDBACK_DIR, f"{_safe_id(dashboard_id)}.jsonl")
+    with progress_lock:
+        with open(feedback_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    logger.info(
+        "feedback.stored dashboard=%s type=%s positive=%s",
+        dashboard_id,
+        feedback.get("contentType"),
+        feedback.get("isPositive"),
+    )
     return {"status": "success", "message": "Feedback submitted successfully."}
 
 
@@ -168,28 +232,47 @@ def get_cache_filename(query_type: str, input_text: str) -> str:
     return os.path.join(AI_CACHED_DIR, f"{hash_key}_{query_type}.json")
 
 
+class AIQueryError(RuntimeError):
+    """Raised when the model call fails.
+
+    BUG-017: this used to raise HTTPException from inside a background task,
+    where there is no request to return it to, so the real cause was swallowed.
+    """
+
+
 def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
-    print(f"Querying AI for {query_type} with prompt: {prompt}")
+    # SEC-006: never log the prompt itself - it contains the full submission.
+    logger.info("ai.query type=%s prompt_chars=%d", query_type, len(prompt))
     cache_file = get_cache_filename(query_type, prompt)
     if os.path.exists(cache_file):
         with open(cache_file, "r") as f:
             cached_response = json.load(f)
+        logger.info("ai.cache_hit type=%s", query_type)
         return cached_response["response"]
 
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME, messages=[{"role": "user", "content": prompt}]
         )
-        content = response.choices[0].message.content
-        cleaned_content = re.sub(
-            r"<think>.*?</think>\s*", "", content, flags=re.DOTALL
-        ).strip()
-        with open(cache_file, "w") as f:
-            json.dump({"response": cleaned_content}, f, indent=2)
-        return cleaned_content
     except Exception as e:
-        print(f"Error querying AI: {e}")
-        raise HTTPException(status_code=500, detail=f"Error querying the AI: {e}")
+        logger.error("ai.error type=%s error=%s", query_type, e)
+        raise AIQueryError(str(e)) from e
+
+    content = response.choices[0].message.content
+    cleaned_content = re.sub(
+        r"<think>.*?</think>\s*", "", content, flags=re.DOTALL
+    ).strip()
+    usage = getattr(response, "usage", None)
+    logger.info(
+        "ai.done type=%s input_tokens=%s output_tokens=%s response_chars=%d",
+        query_type,
+        getattr(usage, "prompt_tokens", "?"),
+        getattr(usage, "completion_tokens", "?"),
+        len(cleaned_content),
+    )
+    with open(cache_file, "w") as f:
+        json.dump({"response": cleaned_content}, f, indent=2)
+    return cleaned_content
 
 
 def generate_chat_response(
@@ -309,10 +392,16 @@ async def get_chat_history(dashboard_id: str = Path(...)):
 
 
 @app.post("/dashboards/{dashboard_id}/chat")
-async def send_chat_message(dashboard_id: str = Path(...), payload: dict = Body(...)):
+def send_chat_message(dashboard_id: str = Path(...), payload: dict = Body(...)):
     """
     Accepts a new chat message and generates an AI response.
     Expects a JSON body with a "message" key.
+
+    BUG-005: declared `def`, not `async def`, on purpose. Every call below is
+    blocking (file I/O, local model inference, the OpenAI request). As an
+    `async def` this ran on the event loop and froze the whole API - a 0.9 ms
+    /submissions request was measured taking 7.6 s during a single chat call.
+    FastAPI runs sync handlers in a threadpool instead.
     """
     message_text = payload.get("message", "").strip()
     if not message_text:
@@ -332,7 +421,7 @@ async def send_chat_message(dashboard_id: str = Path(...), payload: dict = Body(
     user_message = {
         "role": "user",
         "content": message_text,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     chat_history.append(user_message)
 
@@ -350,10 +439,12 @@ async def send_chat_message(dashboard_id: str = Path(...), payload: dict = Body(
         raise HTTPException(status_code=404, detail="Context not found")
 
     # Generate AI response based on the user message.
-    ai_response_str = generate_chat_response(
-        message_text, dashboard_id, markdown_text, context, chat_history
-    )
-    print("AI Response:", ai_response_str)
+    try:
+        ai_response_str = generate_chat_response(
+            message_text, dashboard_id, markdown_text, context, chat_history
+        )
+    except AIQueryError as e:
+        raise HTTPException(status_code=502, detail=f"Error querying the AI: {e}")
 
     try:
         ai_response = clean_and_parse_json(ai_response_str)
@@ -544,56 +635,64 @@ def clean_and_parse_json(text: str):
 # -----------------------------
 # Background Task: Process Submission
 # -----------------------------
+def _fail(submission_id: str, progress: dict, stage: str, error: Exception):
+    progress["status"] = "failed"
+    progress["error"] = f"{stage}: {error}"
+    logger.error("job.failed submission=%s stage=%s error=%s", submission_id, stage, error)
+    save_progress(submission_id, progress)
+
+
 def process_submission_task(submission_id: str):
     # Initialize progress
     progress = load_progress(submission_id)
     progress.update({"status": "processing", "progress": 0, "results": {}})
+    progress.pop("error", None)
     save_progress(submission_id, progress)
 
     submission_folder = os.path.join(SUBMISSIONS_DIR, submission_id)
     if not os.path.exists(submission_folder):
-        progress["status"] = "failed"
-        save_progress(submission_id, progress)
+        _fail(submission_id, progress, "setup", FileNotFoundError(submission_folder))
         return
 
     try:
         markdown_text = read_all_files_from_folder(submission_folder)
         context = get_top_k_related_files_contents(markdown_text, k=10)
-    except Exception:
-        progress["status"] = "failed"
-        save_progress(submission_id, progress)
+    except Exception as e:
+        _fail(submission_id, progress, "retrieval", e)
         return
 
+    # IMP-001: the three generations are independent - none consumes another's
+    # output - so they run concurrently instead of end to end. Wall clock goes
+    # from t1+t2+t3 to max(t1,t2,t3).
+    generators = {
+        "overview": generate_overview,
+        "keyInsights": generate_key_insights,
+        "tabs": generate_tabs,
+    }
+    raw = {}
+    with ThreadPoolExecutor(max_workers=len(generators)) as pool:
+        futures = {
+            pool.submit(fn, markdown_text, submission_id, context): name
+            for name, fn in generators.items()
+        }
+        done_count = 0
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                raw[name] = future.result()
+            except Exception as e:
+                _fail(submission_id, progress, f"generate:{name}", e)
+                return
+            done_count += 1
+            progress["progress"] = int(done_count / len(generators) * 100)
+            save_progress(submission_id, progress)
+
     try:
-        # Generate Overview (33% progress)
-        overview_json_str = generate_overview(markdown_text, submission_id, context)
-        print("Overview JSON:", overview_json_str)
-        overview = clean_and_parse_json(overview_json_str)
-        progress["results"]["overview"] = overview
-        progress["progress"] = 33
-        save_progress(submission_id, progress)
-
-        # Generate Key Insights (66% progress)
-        key_insights_json_str = generate_key_insights(
-            markdown_text, submission_id, context
-        )
-        print("Key Insights JSON:", key_insights_json_str)
-        key_insights = clean_and_parse_json(key_insights_json_str)
-        progress["results"]["keyInsights"] = key_insights
-        progress["progress"] = 66
-        save_progress(submission_id, progress)
-
-        # Generate Tabs (100% progress)
-        tabs_json_str = generate_tabs(markdown_text, submission_id, context)
-        print("Tabs JSON:", tabs_json_str)
-        tabs = clean_and_parse_json(tabs_json_str)
-        progress["results"]["tabs"] = tabs
-        progress["progress"] = 100
-        progress["status"] = "completed"
-        save_progress(submission_id, progress)
-    except Exception:
-        progress["status"] = "failed"
-        save_progress(submission_id, progress)
+        overview = clean_and_parse_json(raw["overview"])
+        key_insights = clean_and_parse_json(raw["keyInsights"])
+        tabs = clean_and_parse_json(raw["tabs"])
+    except Exception as e:
+        _fail(submission_id, progress, "parse", e)
         return
 
     final_result = {
@@ -602,12 +701,29 @@ def process_submission_task(submission_id: str):
         "keyInsights": key_insights,
         "tabs": tabs,
     }
-    final_result_path = os.path.join(PROCESSED_DIR, f"{submission_id}_result.json")
-    with open(final_result_path, "w") as f:
-        f.write(json.dumps(final_result, indent=2))
-    dashboard_path = os.path.join(AI_CACHED_DIR, f"{submission_id}_dashboard.json")
-    with open(dashboard_path, "w") as f:
-        f.write(json.dumps(final_result, indent=2))
+
+    # Persist the dashboard BEFORE announcing completion, otherwise the UI can
+    # follow the "completed" status to a dashboard file that does not exist yet.
+    try:
+        final_result_path = os.path.join(PROCESSED_DIR, f"{submission_id}_result.json")
+        with open(final_result_path, "w") as f:
+            f.write(json.dumps(final_result, indent=2))
+        dashboard_path = os.path.join(AI_CACHED_DIR, f"{submission_id}_dashboard.json")
+        with open(dashboard_path, "w") as f:
+            f.write(json.dumps(final_result, indent=2))
+    except Exception as e:
+        _fail(submission_id, progress, "persist", e)
+        return
+
+    progress["results"] = {
+        "overview": overview,
+        "keyInsights": key_insights,
+        "tabs": tabs,
+    }
+    progress["progress"] = 100
+    progress["status"] = "completed"
+    save_progress(submission_id, progress)
+    logger.info("job.completed submission=%s", submission_id)
 
 
 # -----------------------------
@@ -744,9 +860,10 @@ Output a complete updated dashboard in valid JSON, strictly following the schema
 
 
 @app.post("/dashboards/{dashboard_id}/ai-response")
-async def get_ai_response_to_feedback(
+def get_ai_response_to_feedback(
     dashboard_id: str = Path(...), feedback: dict = Body(...)
 ):
+    # BUG-005: sync on purpose - see send_chat_message.
     dashboard_path = os.path.join(AI_CACHED_DIR, f"{dashboard_id}.json")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Dashboard not found")
@@ -766,6 +883,10 @@ async def get_ai_response_to_feedback(
         updated_response_str = generate_feedback_response(
             feedback, current_dashboard.copy(), context, markdown_text
         )
+    except AIQueryError as e:
+        raise HTTPException(status_code=502, detail=f"Error querying the AI: {e}")
+
+    try:
         updated_dashboard = clean_and_parse_json(updated_response_str)
     except Exception as e:
         raise HTTPException(
@@ -846,7 +967,6 @@ def generate_report(data, output_format="pdf", output_filepath="report"):
     report_lines.append(f"=== {data.get('title', 'Overview Report')} ===\n")
     report_lines.append("Markdown Summary:\n")
     report_lines.append(data.get("markdown", "No overview markdown provided.") + "\n")
-    print(data)
 
     # Key Insights Section.
     key_insights = data.get("keyInsights", [])
@@ -935,16 +1055,23 @@ def generate_report(data, output_format="pdf", output_filepath="report"):
 
 
 @app.post("/generate-pdf")
-async def generate_report_endpoint(
+def generate_report_endpoint(
     payload: dict,
     output_format: str = Query("pdf", description="Output format: 'pdf' or 'txt'"),
 ):
     """
     Generates a report from JSON payload conforming to the expected schemas.
     Returns the generated file (PDF or TXT).
+
+    BUG-016: sync handler - matplotlib rendering and FPDF output block.
     """
-    # Create a temporary file path for output.
-    temp_dir = tempfile.gettempdir()
+    if output_format.lower() not in ("pdf", "txt"):
+        raise HTTPException(
+            status_code=400, detail="output_format must be 'pdf' or 'txt'"
+        )
+    # BUG-015: a fixed filename let concurrent exports overwrite each other and
+    # allowed one user to download another user's report.
+    temp_dir = tempfile.mkdtemp(prefix="report_")
     output_filepath = os.path.join(temp_dir, "report_output")
     file_path = generate_report(
         payload, output_format=output_format, output_filepath=output_filepath

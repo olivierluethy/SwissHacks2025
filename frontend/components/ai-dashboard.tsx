@@ -27,6 +27,31 @@ import KeyInsights from "./key-insights"
 import MarkdownContent from "./markdown-content"
 import FeedbackButton from "./feedback-button"
 
+// BUG-011: module scope. This used to live inside AIDashboard.renderChart, so
+// rendering a pie chart in the chat panel threw "COLORS is not defined".
+const COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042", "#8884d8", "#82ca9d"]
+
+// BUG-012: every chart did Object.keys(data[0]) unguarded and crashed the whole
+// dashboard when the model returned an empty data array.
+function categoryKey(data: any[]): string | undefined {
+  if (!Array.isArray(data) || data.length === 0 || typeof data[0] !== "object" || data[0] === null) {
+    return undefined
+  }
+  return Object.keys(data[0]).find((key) => key !== "value")
+}
+
+function hasChartData(data: any): data is any[] {
+  return Array.isArray(data) && data.length > 0
+}
+
+function EmptyChart({ label = "No chart data was returned for this section." }: { label?: string }) {
+  return (
+    <div className="flex items-center justify-center h-40 text-sm text-gray-500 border border-dashed border-gray-300 rounded-lg">
+      {label}
+    </div>
+  )
+}
+
 type DashboardProps = {
   dashboardId: string;
 };
@@ -180,9 +205,9 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
   }
 
   const renderChart = (chartData: any, tabId: string) => {
-    const { chartType, title, data, xAxisLabel, yAxisLabel } = chartData
-    const COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042", "#8884d8", "#82ca9d"]
+    const { chartType, title, data, xAxisLabel, yAxisLabel } = chartData ?? {}
     const contentId = `chart-${tabId}`
+    const nameKey = categoryKey(data)
 
     return (
       <div className="h-120 w-full relative">
@@ -198,14 +223,15 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
 
         <h3 className="text-lg font-semibold mb-4">{title}</h3>
 
-
-
+        {!hasChartData(data) ? (
+          <EmptyChart />
+        ) : (
         <ResponsiveContainer width="100%" height={500} className="mx-auto">
           {chartType === "bar" ? (
             <BarChart data={data} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis
-                dataKey={Object.keys(data[0]).find(key => key !== "value")}
+                dataKey={nameKey}
                 label={{ value: xAxisLabel, position: "insideBottom", offset: -5 }}
               />
               <YAxis
@@ -234,7 +260,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
             <LineChart data={data} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis
-                dataKey={Object.keys(data[0]).find(key => key !== "value")}
+                dataKey={nameKey}
                 label={{ value: xAxisLabel, position: "insideBottom", offset: -5 }}
               />
               <YAxis
@@ -270,7 +296,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
                 outerRadius={150}
                 fill="#8884d8"
                 dataKey="value"
-                nameKey={Object.keys(data[0]).find(key => key !== "value")}
+                nameKey={nameKey}
               >
                 {data.map((entry: any, index: number) => (
                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
@@ -292,6 +318,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
             <div>Unsupported chart type: {chartType}</div>
           )}
         </ResponsiveContainer>
+        )}
       </div>
     )
   }
@@ -498,7 +525,13 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
         >
           <div className="whitespace-pre-wrap">{message.content}</div>
 
-          {message.chart && (
+          {message.chart && !hasChartData(message.chart.data) && (
+            <div className="mt-4">
+              <EmptyChart label="The assistant returned a chart with no data points." />
+            </div>
+          )}
+
+          {message.chart && hasChartData(message.chart.data) && (
             <div className="mt-4 h-64 w-full">
               <ResponsiveContainer width="100%" height="100%" className="mx-auto">
                 {message.chart.chartType === "bar" ? (
@@ -506,7 +539,7 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
 
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis
-                      dataKey={Object.keys(message.chart.data[0]).find(key => key !== "value")}
+                      dataKey={categoryKey(message.chart.data)}
                       label={{ value: message.chart.xAxisLabel, position: "insideBottom", offset: -5 }}
                     />
                     <YAxis
@@ -535,7 +568,7 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
                   <LineChart data={message.chart.data} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis
-                      dataKey={Object.keys(message.chart.data[0]).find(key => key !== "value")}
+                      dataKey={categoryKey(message.chart.data)}
                       label={{ value: message.chart.xAxisLabel, position: "insideBottom", offset: -5 }}
                     />
                     <YAxis
@@ -571,7 +604,7 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
                       outerRadius={150}
                       fill="#8884d8"
                       dataKey="value"
-                      nameKey={Object.keys(message.chart.data[0]).find(key => key !== "value")}
+                      nameKey={categoryKey(message.chart.data)}
                     >
                       {message.chart.data.map((entry: any, index: number) => (
                         <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />

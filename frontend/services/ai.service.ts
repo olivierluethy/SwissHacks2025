@@ -165,9 +165,10 @@ export const aiService = {
       const response = await api.get("/submissions")
       return response.data
     } catch (error) {
+      // BUG-006: never fall back to mock data. Showing fabricated insurance
+      // figures when the backend is down is worse than showing an error.
       console.error("Error fetching submissions:", error)
-      // Return mock data as fallback
-      return mockSubmissions
+      throw error
     }
   },
 
@@ -267,9 +268,9 @@ export const aiService = {
       const response = await api.get(`/dashboards/${dashboardId}`)
       return response.data
     } catch (error) {
+      // BUG-006: no mock fallback - see getSubmissions.
       console.error("Error fetching dashboard:", error)
-      // Return mock data as fallback
-      return mockDashboardData
+      throw error
     }
   },
 
@@ -288,9 +289,9 @@ export const aiService = {
       const response = await api.get(`/dashboards/${dashboardId}/chat`)
       return response.data
     } catch (error) {
+      // BUG-006: no mock fallback - see getSubmissions.
       console.error("Error fetching chat history:", error)
-      // Return mock chat history
-      return mockChatHistory
+      throw error
     }
   },
 
