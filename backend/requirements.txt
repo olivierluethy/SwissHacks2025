@@ -5,7 +5,6 @@ python-multipart
 uvicorn
 openai
 sentence_transformers
-tempfile
 matplotlib
 fpdf
 bs4
