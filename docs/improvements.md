@@ -1,5 +1,61 @@
 # SwissHacks2025 — Full Codebase Audit
 
+> ## ⚠️ Status: this document describes the code as it was on 2026-07-25
+>
+> The roadmap in §9 has since been implemented on branch
+> `feat/roadmap-implementation` (commits `3c8f0a8`, `d2a5d5a`). **Sections 3–7
+> below describe the *old* code and are kept as the historical record — do not
+> read them as a description of the current system.** See
+> [Implementation status](#implementation-status) for what changed, and the
+> [README](../README.md) for how the code works now.
+
+## Implementation status
+
+Verified on 2026-07-26 against a clean start of both services.
+
+| Roadmap phase | State | Evidence |
+|---|---|---|
+| Phase 1 — quick wins | **Done** (10/10) | commit `3c8f0a8` |
+| Phase 2 — structural fixes | **Done** (10/10) | commit `d2a5d5a` |
+| Phase 3 — longer-term | **Done, with one item deliberately scoped down** | commit `d2a5d5a` |
+
+**Measured after the changes:**
+
+| Metric | Before | After |
+|---|---|---|
+| Retrieval per call | 3.5 s (0.577 s JSON load + 2.613 s model construction) | **0.017–0.068 s** |
+| Poll latency during a chat call | 7.645 s | **1.2–5.5 ms** |
+| Aggregate prompt size | ~97,800 tokens × 3 | summaries + context, a few thousand tokens × 3 |
+| Model calls per run | 3 sequential | N document summaries (concurrent, cached) + 3 concurrent aggregates |
+| `?filename=../../../../../../../etc/passwd` | returned `/etc/passwd` | **404** |
+| Arbitrary `Origin` with credentials | reflected | **not reflected** |
+| Second `POST /process` while running | silently raced the first | **409** |
+| npm vulnerabilities | 13 (2 critical, 8 high) | **3 (0 critical, 3 high, all transitive via `next`)** |
+| Backend tests | 0 | **96, passing** |
+| Frontend type errors in build | suppressed by config | **0, and checking is enforced again** |
+| Retrieval quality | all 3 submissions returned the same Florida hurricane files | three distinct, plausible result sets |
+
+**Not done, and why:**
+
+- **SEC-002 per-user data scoping.** Implemented as a single shared bearer token
+  (`API_TOKEN`) rather than user accounts, per an explicit decision — the app has
+  no user model and inventing one was out of scope. This closes "anyone who can
+  reach the port owns the API" but *not* "user A can read user B's submissions".
+  Tracked in [`data-handling.md`](data-handling.md).
+- **IMP-005 model benchmark.** The knobs (`timeout`, `max_completion_tokens`,
+  `reasoning_effort`, `OPENAI_MODEL`) are implemented and the default is
+  unchanged at `o3-mini` so quality does not shift silently. The benchmark
+  *itself* could not be run — no API key was available — so it ships as
+  `backend/scripts/benchmark_models.py` for you to run.
+- **Real end-to-end LLM verification.** Everything on the model path is covered
+  by tests with the model stubbed. **No production OpenAI call has been made
+  against this code.** Run one analysis with a real key before trusting it.
+- **Git history rewrite.** The 50 MB `embeddings.json` is removed from the
+  working tree and superseded by a gitignored build artifact, but it remains in
+  history (`size-pack: 46.21 MiB`). Rewriting shared history is your call.
+
+---
+
 **Audit date:** 2026-07-25
 **Repo state:** branch `main`, commit `f54dae6` ("Delete unused files"), working tree clean at start
 **Scope:** analysis only. No features were built, nothing was refactored. The only code changes are the two minimal fixes needed to start the app (see §11).
@@ -452,6 +508,9 @@ Genuine credit where it is due:
 ---
 
 ## 9. Recommended roadmap
+
+> **All three phases were implemented** — see [Implementation status](#implementation-status).
+> The list below is the original plan, kept as written.
 
 ### Phase 1 — Quick wins (< 1 day)
 
