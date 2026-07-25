@@ -8,3 +8,7 @@ sentence_transformers
 matplotlib
 fpdf
 bs4
+numpy
+pydantic
+pytest
+httpx

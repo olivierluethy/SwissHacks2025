@@ -1,8 +1,8 @@
 import { api } from "./api"
 
 // Flag to toggle between mock and real API
+// IMP-017: API_BASE_URL was unused - all traffic goes through /api/proxy.
 const API_MODE = process.env.NEXT_PUBLIC_API_MODE || "real"
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "/api"
 
 // Mock dashboard data
 const mockDashboardData = {
@@ -213,6 +213,14 @@ export const aiService = {
   },
 
   /**
+   * IMP-010: ask a running analysis to stop at its next checkpoint.
+   */
+  cancelSubmission: async (submissionId: string) => {
+    const response = await api.post(`/submissions/${submissionId}/cancel`)
+    return response.data
+  },
+
+  /**
    * Get submission processing status
    * @param {string} submissionId - The submission ID
    * @returns {Promise<Object>} Status response
@@ -351,6 +359,75 @@ export const aiService = {
   },
 
   /**
+   * IMP-003: stream the answer token by token.
+   *
+   * Total latency is unchanged, but the first words appear in a couple of
+   * seconds instead of after the whole call. Falls back to the buffered
+   * endpoint if streaming is unavailable.
+   */
+  streamMessage: async (
+    dashboardId: string,
+    message: string,
+    handlers: {
+      onToken: (text: string) => void
+      onChart?: (chart: any) => void
+      onDone?: (message: any) => void
+      signal?: AbortSignal
+    },
+  ) => {
+    const response = await fetch(`/api/proxy/dashboards/${dashboardId}/chat/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+      signal: handlers.signal,
+    })
+
+    if (!response.ok || !response.body) {
+      throw new Error(`Chat stream failed: ${response.status} ${response.statusText}`)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ""
+    let finalMessage: any = null
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      // SSE frames are separated by a blank line.
+      const frames = buffer.split("\n\n")
+      buffer = frames.pop() ?? ""
+
+      for (const frame of frames) {
+        let event = "message"
+        const dataLines: string[] = []
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim()
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim())
+        }
+        if (dataLines.length === 0) continue
+
+        let payload: any
+        try {
+          payload = JSON.parse(dataLines.join("\n"))
+        } catch {
+          continue
+        }
+
+        if (event === "token") handlers.onToken(payload.text ?? "")
+        else if (event === "chart") handlers.onChart?.(payload)
+        else if (event === "done") finalMessage = payload
+        else if (event === "error") throw new Error(payload.detail ?? "Stream error")
+      }
+    }
+
+    handlers.onDone?.(finalMessage)
+    return finalMessage
+  },
+
+  /**
    * Submit feedback on dashboard content
    * @param {Object} feedback - Feedback data
    * @returns {Promise<Object>} Feedback response
@@ -393,6 +470,9 @@ export const aiService = {
     contentType: string
     feedbackText: string
     isPositive: boolean
+    // markdown-content.tsx sends this for text selections; it was missing from
+    // the signature while the mock branch already read it (BUG-021 fallout).
+    selectedText?: string
   }) => {
     try {
       if (API_MODE === "mock") {
@@ -400,7 +480,7 @@ export const aiService = {
         await new Promise((resolve) => setTimeout(resolve, 2000))
 
         // Generate mock updated content based on feedback type
-        let updatedContent = {}
+        let updatedContent: Record<string, any> = {}
 
         // Different responses based on content type
         if (feedback.contentType === "heading") {
@@ -443,7 +523,8 @@ export const aiService = {
                   content: {
                     ...tab.content,
                     data: {
-                      ...tab.content.data,
+                      // The mock tabs union types `data` as string | object.
+                      ...(tab.content.data as Record<string, any>),
                       title: "Revised Number Types Distribution (Based on Feedback)",
                       description: "This visualization has been updated based on your feedback.",
                     },

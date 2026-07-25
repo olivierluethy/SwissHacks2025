@@ -26,6 +26,7 @@ import ExportDialog from "./export-dialog"
 import KeyInsights from "./key-insights"
 import MarkdownContent from "./markdown-content"
 import FeedbackButton from "./feedback-button"
+import SafeHtml from "./safe-html"
 
 // BUG-011: module scope. This used to live inside AIDashboard.renderChart, so
 // rendering a pie chart in the chat panel threw "COLORS is not defined".
@@ -42,6 +43,31 @@ function categoryKey(data: any[]): string | undefined {
 
 function hasChartData(data: any): data is any[] {
   return Array.isArray(data) && data.length > 0
+}
+
+// Recharts hands formatters a ValueType (string | number | array), but Intl
+// only accepts numbers. Narrowing here keeps the charts type-safe under
+// BUG-021 (TypeScript checks re-enabled in the build).
+function toNumber(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function formatCompact(value: unknown): string {
+  const n = toNumber(value)
+  if (n === null) return String(value ?? "")
+  return new Intl.NumberFormat("en", { notation: "compact", compactDisplay: "short" }).format(n)
+}
+
+function formatCurrency(value: unknown): string {
+  const n = toNumber(value)
+  if (n === null) return String(value ?? "")
+  return new Intl.NumberFormat("en", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    compactDisplay: "short",
+  }).format(n)
 }
 
 function EmptyChart({ label = "No chart data was returned for this section." }: { label?: string }) {
@@ -236,22 +262,10 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
               />
               <YAxis
                 label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }}
-                tickFormatter={(value) =>
-                  new Intl.NumberFormat("en", {
-                    notation: "compact",
-                    compactDisplay: "short",
-                  }).format(value)
-                }
+                tickFormatter={formatCompact}
               />
               <Tooltip
-                formatter={(value) =>
-                  new Intl.NumberFormat("en", {
-                    style: "currency",
-                    currency: "USD",
-                    notation: "compact",
-                    compactDisplay: "short",
-                  }).format(value)
-                }
+                formatter={formatCurrency}
               />
               <Legend />
               <Bar dataKey="value" fill="#8884d8" />
@@ -265,22 +279,10 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
               />
               <YAxis
                 label={{ value: yAxisLabel, angle: -90, position: "insideLeft" }}
-                tickFormatter={(value) =>
-                  new Intl.NumberFormat("en", {
-                    notation: "compact",
-                    compactDisplay: "short",
-                  }).format(value)
-                }
+                tickFormatter={formatCompact}
               />
               <Tooltip
-                formatter={(value) =>
-                  new Intl.NumberFormat("en", {
-                    style: "currency",
-                    currency: "USD",
-                    notation: "compact",
-                    compactDisplay: "short",
-                  }).format(value)
-                }
+                formatter={formatCurrency}
               />
               <Legend />
               <Line type="monotone" dataKey="value" stroke="#8884d8" activeDot={{ r: 8 }} />
@@ -303,14 +305,7 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
                 ))}
               </Pie>
               <Tooltip
-                formatter={(value) =>
-                  new Intl.NumberFormat("en", {
-                    style: "currency",
-                    currency: "USD",
-                    notation: "compact",
-                    compactDisplay: "short",
-                  }).format(value)
-                }
+                formatter={formatCurrency}
               />
               <Legend />
             </PieChart>
@@ -338,7 +333,8 @@ export default function AIDashboard({ dashboardId }: DashboardProps) {
               onReportUpdated={handleReportUpdate}
             />
           </div>
-          <div dangerouslySetInnerHTML={{ __html: tab.content.data }} />
+          {/* SEC-005: sanitised before it reaches the DOM. */}
+          <SafeHtml html={tab.content.data} />
         </div>
       )
     }
@@ -463,6 +459,7 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
 
   useEffect(() => {
     const fetchChatHistory = async () => {
@@ -489,28 +486,65 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!newMessage.trim()) return;
+    const question = newMessage.trim();
+    if (!question) return;
 
     const userMessage = {
       role: "user",
-      content: newMessage,
+      content: question,
       timestamp: new Date().toISOString(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    // IMP-003: append an empty assistant message and fill it as tokens arrive,
+    // so the user sees words in ~2 s instead of staring at a spinner.
+    setMessages((prev) => [
+      ...prev,
+      userMessage,
+      { role: "assistant", content: "", streaming: true },
+    ]);
     setNewMessage("");
+    setError(null);
+    setLoading(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const updateLast = (patch: (m: any) => any) =>
+      setMessages((prev) => {
+        const next = [...prev];
+        next[next.length - 1] = patch(next[next.length - 1]);
+        return next;
+      });
 
     try {
-      setLoading(true);
-      const response = await aiService.sendMessage(dashboardId, newMessage);
-      setMessages((prev) => [...prev, response]);
-    } catch (err) {
-      console.error("Error sending message:", err);
-      setError("Failed to send message");
+      await aiService.streamMessage(dashboardId, question, {
+        signal: controller.signal,
+        onToken: (text) =>
+          updateLast((m) => ({ ...m, content: (m.content ?? "") + text })),
+        onChart: (chart) => updateLast((m) => ({ ...m, chart })),
+        onDone: (final) =>
+          updateLast((m) => ({ ...(final ?? m), streaming: false })),
+      });
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        updateLast((m) => ({
+          ...m,
+          streaming: false,
+          content: (m.content ?? "") + "\n\n_(stopped)_",
+        }));
+      } else {
+        console.error("Error sending message:", err);
+        setError("Failed to send message");
+        // Drop the placeholder so a failed turn does not look like an answer.
+        setMessages((prev) => prev.slice(0, -1));
+      }
     } finally {
       setLoading(false);
+      abortRef.current = null;
     }
   };
+
+  const stopStreaming = () => abortRef.current?.abort();
 
   const renderMessage = (message: any) => {
     return (
@@ -523,7 +557,12 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
             : "bg-gray-100 text-gray-900"
             }`}
         >
-          <div className="whitespace-pre-wrap">{message.content}</div>
+          <div className="whitespace-pre-wrap">
+            {message.content}
+            {message.streaming && (
+              <span className="inline-block w-2 h-4 ml-0.5 bg-gray-500 animate-pulse align-middle" />
+            )}
+          </div>
 
           {message.chart && !hasChartData(message.chart.data) && (
             <div className="mt-4">
@@ -544,22 +583,10 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
                     />
                     <YAxis
                       label={{ value: message.chart.yAxisLabel, angle: -90, position: "insideLeft" }}
-                      tickFormatter={(value) =>
-                        new Intl.NumberFormat("en", {
-                          notation: "compact",
-                          compactDisplay: "short",
-                        }).format(value)
-                      }
+                      tickFormatter={formatCompact}
                     />
                     <Tooltip
-                      formatter={(value) =>
-                        new Intl.NumberFormat("en", {
-                          style: "currency",
-                          currency: "USD",
-                          notation: "compact",
-                          compactDisplay: "short",
-                        }).format(value)
-                      }
+                      formatter={formatCurrency}
                     />
                     <Legend />
                     <Bar dataKey="value" fill="#8884d8" />
@@ -573,22 +600,10 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
                     />
                     <YAxis
                       label={{ value: message.chart.yAxisLabel, angle: -90, position: "insideLeft" }}
-                      tickFormatter={(value) =>
-                        new Intl.NumberFormat("en", {
-                          notation: "compact",
-                          compactDisplay: "short",
-                        }).format(value)
-                      }
+                      tickFormatter={formatCompact}
                     />
                     <Tooltip
-                      formatter={(value) =>
-                        new Intl.NumberFormat("en", {
-                          style: "currency",
-                          currency: "USD",
-                          notation: "compact",
-                          compactDisplay: "short",
-                        }).format(value)
-                      }
+                      formatter={formatCurrency}
                     />
                     <Legend />
                     <Line type="monotone" dataKey="value" stroke="#8884d8" activeDot={{ r: 8 }} />
@@ -611,14 +626,7 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
                       ))}
                     </Pie>
                     <Tooltip
-                      formatter={(value) =>
-                        new Intl.NumberFormat("en", {
-                          style: "currency",
-                          currency: "USD",
-                          notation: "compact",
-                          compactDisplay: "short",
-                        }).format(value)
-                      }
+                      formatter={formatCurrency}
                     />
                     <Legend />
                   </PieChart>
@@ -715,13 +723,23 @@ function AIChatPanel({ dashboardId }: { dashboardId: string }) {
             className="flex-1 px-4 py-2 border border-gray-300 rounded-l-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             disabled={loading}
           />
-          <button
-            type="submit"
-            className="px-4 py-2 bg-blue-600 text-white rounded-r-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-blue-400"
-            disabled={loading || !newMessage.trim()}
-          >
-            {loading ? "Sending..." : "Send"}
-          </button>
+          {loading ? (
+            <button
+              type="button"
+              onClick={stopStreaming}
+              className="px-4 py-2 bg-gray-700 text-white rounded-r-md hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-500"
+            >
+              Stop
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="px-4 py-2 bg-blue-600 text-white rounded-r-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-blue-400"
+              disabled={!newMessage.trim()}
+            >
+              Send
+            </button>
+          )}
         </form>
       </div>
     </div>

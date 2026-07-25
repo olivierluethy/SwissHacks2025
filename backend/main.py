@@ -1,29 +1,54 @@
-import os
+"""ReInsight API.
+
+Analysis pipeline, dashboard access, chat and report export.
+
+See docs/improvements.md for the audit this structure came out of. The short
+version: the analysis now runs as a map-reduce over cached per-document
+summaries (pipeline.py), model output is schema-validated rather than
+regex-repaired (llm.py + schemas.py), job state lives in SQLite rather than in
+loose JSON files (jobs.py), and no handler performs blocking work on the event
+loop.
+"""
+
+from __future__ import annotations
+
 import json
-import re
-import hashlib
-import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
-from datetime import datetime, timezone
-
+import os
+import re
 import tempfile
-import matplotlib.pyplot as plt
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
-from fpdf import FPDF, HTMLMixin
-from bs4 import BeautifulSoup
+from datetime import datetime, timezone
+from typing import List, Optional
+
 import uvicorn
-
-from fastapi import Path, Body, BackgroundTasks
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Path as PathParam,
+    Query,
+    UploadFile,
+)
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from openai import OpenAI
+from pydantic import BaseModel
 
-# For RAG (retrieval augmented generation)
-from data import data_endpoints
-from data.data_endpoints import get_top_k_related_files_contents
+import config
+import ingest
+import jobs
+import llm
+import pipeline
+import prompts
+import report
+import retrieval
+from auth import require_token
+from schemas import ChatChartDecision, Overview
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -31,176 +56,210 @@ logging.basicConfig(
 )
 logger = logging.getLogger("archre")
 
-# Set your OpenAI API key (ensure this key is available in your environment)
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-MODEL_NAME = "o3-mini"  # Or "gpt-4" if desired
+config.ensure_runtime_dirs()
 
-# SEC-003: never reflect an arbitrary Origin back with credentials enabled.
-CORS_ALLOW_ORIGINS = [
-    origin.strip()
-    for origin in os.environ.get(
-        "CORS_ALLOW_ORIGINS", "http://localhost:3000"
-    ).split(",")
-    if origin.strip()
-]
-
-app = FastAPI(title="Async File Processing API with AI Caching, Feedback & Progress")
+app = FastAPI(title="ReInsight API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ALLOW_ORIGINS,
+    # SEC-003: an explicit allowlist. Reflecting an arbitrary Origin while
+    # allow_credentials is on let any site drive this API.
+    allow_origins=config.CORS_ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
-# -----------------------------
-# Directory Setup
-# -----------------------------
-UPLOAD_DIR = "uploads"
-PROCESSING_DIR = "processing"
-PROCESSED_DIR = "processed"
-ANALYSIS_DIR = "analysis"
-AI_CACHED_DIR = "data/ai_cached"  # Cache AI results and dashboards
-PROGRESS_DIR = "data/progress"  # Persist progress per submission
-SUBMISSIONS_DIR = "data/submissions_processed"  # Processed submissions
-FEEDBACK_DIR = "data/feedback"  # Persisted user feedback (BUG-019)
-
-for folder in [
-    UPLOAD_DIR,
-    PROCESSING_DIR,
-    PROCESSED_DIR,
-    ANALYSIS_DIR,
-    AI_CACHED_DIR,
-    SUBMISSIONS_DIR,
-    PROGRESS_DIR,
-    FEEDBACK_DIR,
-]:
-    os.makedirs(folder, exist_ok=True)
-
-# Lock for file writes
-progress_lock = Lock()
+# SEC-007: results are only served statically when explicitly enabled.
+if os.environ.get("SERVE_RESULTS_STATICALLY", "").lower() in ("1", "true", "yes"):
+    app.mount("/results", StaticFiles(directory=str(config.PROCESSED_DIR)), name="results")
 
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 
-def _safe_id(value: str) -> str:
-    """Reduce an id to characters that cannot escape a directory.
-
-    Path parameters cannot contain '/' after routing, but ids are used to build
-    filenames in several places; this makes that safe by construction.
-    """
+def safe_id(value: str) -> str:
     cleaned = _SAFE_ID_RE.sub("_", value).lstrip(".")
     if not cleaned:
         raise HTTPException(status_code=400, detail="Invalid identifier")
     return cleaned
 
 
-# -----------------------------
-# Utility: Persistent Progress
-# -----------------------------
-def get_progress_path(submission_id: str) -> str:
-    return os.path.join(PROGRESS_DIR, f"progress_{submission_id}.json")
-
-
-def load_progress(submission_id: str) -> dict:
-    progress_path = get_progress_path(submission_id)
-    if os.path.exists(progress_path):
-        with open(progress_path, "r") as f:
-            return json.load(f)
-    return {"status": "pending", "progress": 0, "results": {}}
-
-
-def save_progress(submission_id: str, data: dict):
-    progress_path = get_progress_path(submission_id)
-    with progress_lock:
-        with open(progress_path, "w") as f:
-            json.dump(data, f, indent=2)
-
-
-# -----------------------------
-# Serve Static Files for Processed Results and Dashboards
-# -----------------------------
-app.mount("/results", StaticFiles(directory=PROCESSED_DIR), name="results")
-app.include_router(data_endpoints.router, prefix="")
+def submission_id_from_dashboard(dashboard_id: str) -> str:
+    return safe_id(dashboard_id).rsplit("_dashboard", 1)[0]
 
 
 @app.on_event("startup")
-def _warmup_retrieval():
-    """IMP-002: build the embedding index and load the encoder once, at boot,
-    instead of on every request."""
+def _startup() -> None:
+    jobs.init()
+    # BUG-010: a job still marked processing cannot have a live task behind it,
+    # because the task lived in the process that just died.
+    recovered = jobs.recover_all_processing()
+    if recovered:
+        logger.warning("startup.recovered_jobs count=%d", recovered)
     try:
-        data_endpoints.warmup()
-    except Exception as e:  # non-fatal: retrieval endpoints will report it
-        logger.error("retrieval.warmup_failed error=%s", e)
+        retrieval.warmup()  # IMP-002
+    except Exception as e:
+        logger.error("startup.retrieval_warmup_failed error=%s", e)
 
 
-# -----------------------------
-# Submission Endpoints
-# -----------------------------
-@app.get("/submissions")
-async def list_submissions():
-    submissions = []
-    for fname in sorted(os.listdir(SUBMISSIONS_DIR)):
-        submission_path = os.path.join(SUBMISSIONS_DIR, fname)
-        if not os.path.isdir(submission_path):
-            continue
-
-        if not os.path.exists(get_progress_path(fname)):
-            submissions.append({"id": fname, "status": "pending", "progress": 0})
-            continue
-
-        # BUG-007: report the real state. Collapsing 'processing' and 'failed'
-        # into 'pending' made failures indistinguishable from never-started runs.
-        progress = await asyncio.to_thread(load_progress, fname)
-        entry = {
-            "id": fname,
-            "status": progress.get("status", "pending"),
-            "progress": progress.get("progress", 0),
-        }
-        if entry["status"] == "completed":
-            entry["dashboardId"] = fname + "_dashboard"
-        if progress.get("error"):
-            entry["error"] = progress["error"]
-        submissions.append(entry)
-    return submissions
-
-
-@app.get("/submissions/{submission_id}/status")
-async def get_submission_status(submission_id: str = Path(...)):
-    progress = await asyncio.to_thread(load_progress, submission_id)
-    if not progress:
-        raise HTTPException(status_code=404, detail="Submission not found")
+@app.get("/health")
+def health() -> dict:
     return {
-        "status": progress.get("status", "pending"),
-        "progress": progress.get("progress", 0),
-        "dashboardId": submission_id + "_dashboard",
-        "error": progress.get("error"),
+        "status": "ok",
+        "model": config.MODEL_NAME,
+        "summaryModel": config.SUMMARY_MODEL_NAME,
+        "retrievalIndex": "ready" if retrieval.index_exists() else "missing",
+        "authRequired": bool(config.API_TOKEN),
     }
 
 
-@app.get("/dashboards/{dashboard_id}")
-async def get_dashboard(dashboard_id: str = Path(...)):
-    dashboard_file = os.path.join(AI_CACHED_DIR, f"{dashboard_id}.json")
-    if not os.path.exists(dashboard_file):
+# ---------------------------------------------------------------------------
+# Submissions
+# ---------------------------------------------------------------------------
+def _list_submission_ids() -> List[str]:
+    if not config.SUBMISSIONS_DIR.is_dir():
+        return []
+    return sorted(p.name for p in config.SUBMISSIONS_DIR.iterdir() if p.is_dir())
+
+
+@app.get("/submissions", dependencies=[Depends(require_token)])
+def list_submissions() -> List[dict]:
+    """BUG-007: report the real job state. Collapsing everything that was not
+    'completed' into 'pending' made a failed run look like one never started."""
+    known = {job.submission_id: job for job in jobs.all_jobs()}
+    result = []
+    for submission_id in _list_submission_ids():
+        job = known.get(submission_id)
+        if job is None:
+            result.append({"id": submission_id, "status": jobs.PENDING, "progress": 0})
+            continue
+        entry = job.to_api()
+        if job.status == jobs.COMPLETED:
+            entry["dashboardId"] = f"{submission_id}_dashboard"
+        result.append(entry)
+    return result
+
+
+@app.get("/submissions/{submission_id}/status", dependencies=[Depends(require_token)])
+def get_submission_status(submission_id: str = PathParam(...)) -> dict:
+    submission_id = safe_id(submission_id)
+    job = jobs.get(submission_id)
+    if job is None:
+        if not (config.SUBMISSIONS_DIR / submission_id).is_dir():
+            raise HTTPException(status_code=404, detail="Submission not found")
+        return {
+            "status": jobs.PENDING,
+            "progress": 0,
+            "step": None,
+            "error": None,
+            "dashboardId": f"{submission_id}_dashboard",
+        }
+    payload = job.to_api()
+    payload["dashboardId"] = f"{submission_id}_dashboard"
+    return payload
+
+
+@app.post("/submissions/{submission_id}/process", dependencies=[Depends(require_token)])
+def process_submission_endpoint(
+    background_tasks: BackgroundTasks,
+    submission_id: str = PathParam(...),
+) -> dict:
+    submission_id = safe_id(submission_id)
+    if not (config.SUBMISSIONS_DIR / submission_id).is_dir():
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    # BUG-009: atomic claim. A second start while one is in flight is refused
+    # instead of silently racing the first.
+    if not jobs.claim(submission_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This submission is already being processed.",
+        )
+
+    background_tasks.add_task(pipeline.run, submission_id)
+    return {"submission_id": submission_id, "status": "processing started"}
+
+
+@app.post("/submissions", status_code=201, dependencies=[Depends(require_token)])
+async def create_submission(
+    submission_id: str = Form(...),
+    files: List[UploadFile] = File(...),
+) -> dict:
+    """IMP-015: upload documents and have them converted on the server.
+
+    Excel goes through the BFS table extractor and PDF through marker-pdf - the
+    code that previously only ran as a manual script.
+    """
+    submission_id = safe_id(submission_id)
+    if (config.SUBMISSIONS_DIR / submission_id).exists():
+        raise HTTPException(status_code=409, detail="Submission already exists")
+
+    payloads: List[tuple] = []
+    total = 0
+    for upload in files:
+        data = await upload.read()
+        total += len(data)
+        if total > ingest.MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Upload too large")
+        payloads.append((upload.filename or "unnamed", data))
+
+    try:
+        # Conversion is CPU-bound and blocking; keep it off the event loop.
+        written = await run_in_threadpool(
+            ingest.store_submission, submission_id, payloads
+        )
+    except ingest.UnsupportedFile as e:
+        raise HTTPException(status_code=415, detail=str(e))
+    except FileExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.exception("ingest.failed submission=%s", submission_id)
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {e}")
+
+    return {"id": submission_id, "files": written, "status": jobs.PENDING}
+
+
+@app.post("/submissions/{submission_id}/cancel", dependencies=[Depends(require_token)])
+def cancel_submission(submission_id: str = PathParam(...)) -> dict:
+    """IMP-010: ask a running analysis to stop at its next checkpoint."""
+    submission_id = safe_id(submission_id)
+    if not jobs.request_cancel(submission_id):
+        raise HTTPException(status_code=409, detail="No run in progress.")
+    return {"submission_id": submission_id, "status": "cancelling"}
+
+
+# ---------------------------------------------------------------------------
+# Dashboards
+# ---------------------------------------------------------------------------
+def _dashboard_path(dashboard_id: str):
+    return config.AI_CACHED_DIR / f"{safe_id(dashboard_id)}.json"
+
+
+def _load_dashboard(dashboard_id: str) -> dict:
+    path = _dashboard_path(dashboard_id)
+    if not path.exists():
         raise HTTPException(status_code=404, detail="Dashboard not found")
-    with open(dashboard_file, "r") as f:
-        dashboard_data = json.load(f)
-    return dashboard_data
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-@app.post("/dashboards/{dashboard_id}/feedback")
-async def submit_feedback(dashboard_id: str = Path(...), feedback: dict = Body(...)):
-    """BUG-019: feedback used to be print()ed and discarded. It is now appended
-    to a per-dashboard JSONL file so it can actually be reviewed."""
+@app.get("/dashboards/{dashboard_id}", dependencies=[Depends(require_token)])
+def get_dashboard(dashboard_id: str = PathParam(...)) -> dict:
+    return _load_dashboard(dashboard_id)
+
+
+@app.post("/dashboards/{dashboard_id}/feedback", dependencies=[Depends(require_token)])
+def submit_feedback(
+    dashboard_id: str = PathParam(...), feedback: dict = Body(...)
+) -> dict:
+    """BUG-019: feedback used to be printed and discarded."""
     record = {
         "dashboardId": dashboard_id,
         "receivedAt": datetime.now(timezone.utc).isoformat(),
         **{k: v for k, v in feedback.items() if k != "dashboardId"},
     }
-    feedback_path = os.path.join(FEEDBACK_DIR, f"{_safe_id(dashboard_id)}.jsonl")
-    with progress_lock:
-        with open(feedback_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+    path = config.FEEDBACK_DIR / f"{safe_id(dashboard_id)}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
     logger.info(
         "feedback.stored dashboard=%s type=%s positive=%s",
         dashboard_id,
@@ -210,883 +269,304 @@ async def submit_feedback(dashboard_id: str = Path(...), feedback: dict = Body(.
     return {"status": "success", "message": "Feedback submitted successfully."}
 
 
-@app.delete("/dashboards/{dashboard_id}/chat")
-async def delete_chat_history(dashboard_id: str = Path(...)):
+@app.post("/dashboards/{dashboard_id}/ai-response", dependencies=[Depends(require_token)])
+def get_ai_response_to_feedback(
+    dashboard_id: str = PathParam(...), feedback: dict = Body(...)
+) -> dict:
+    """Revise the overview section in response to reviewer feedback.
+
+    COST-003: this used to regenerate the entire dashboard - current dashboard +
+    context + the whole submission in, a complete dashboard out - on every
+    thumbs click. It now revises one section from cached summaries.
     """
-    Deletes the chat history for the given dashboard.
-    """
-    chat_file = os.path.join(AI_CACHED_DIR, f"{dashboard_id}_chat.json")
-    if os.path.exists(chat_file):
-        os.remove(chat_file)
-        return {"status": "success", "message": "Chat history deleted."}
-    else:
-        raise HTTPException(status_code=404, detail="Chat history not found.")
-
-
-# -----------------------------
-# AI Caching Helpers & AI Query Functions
-# -----------------------------
-def get_cache_filename(query_type: str, input_text: str) -> str:
-    key = f"{query_type}_{input_text}"
-    hash_key = hashlib.md5(key.encode("utf-8")).hexdigest()
-    return os.path.join(AI_CACHED_DIR, f"{hash_key}_{query_type}.json")
-
-
-class AIQueryError(RuntimeError):
-    """Raised when the model call fails.
-
-    BUG-017: this used to raise HTTPException from inside a background task,
-    where there is no request to return it to, so the real cause was swallowed.
-    """
-
-
-def cached_ai_query(prompt: str, query_type: str, submission_id: str) -> str:
-    # SEC-006: never log the prompt itself - it contains the full submission.
-    logger.info("ai.query type=%s prompt_chars=%d", query_type, len(prompt))
-    cache_file = get_cache_filename(query_type, prompt)
-    if os.path.exists(cache_file):
-        with open(cache_file, "r") as f:
-            cached_response = json.load(f)
-        logger.info("ai.cache_hit type=%s", query_type)
-        return cached_response["response"]
+    dashboard = _load_dashboard(dashboard_id)
+    submission_id = submission_id_from_dashboard(dashboard_id)
 
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME, messages=[{"role": "user", "content": prompt}]
-        )
-    except Exception as e:
-        logger.error("ai.error type=%s error=%s", query_type, e)
-        raise AIQueryError(str(e)) from e
+        summaries_text = pipeline.load_summaries_text(submission_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Submission folder not found")
+    except llm.AIQueryError as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
-    content = response.choices[0].message.content
-    cleaned_content = re.sub(
-        r"<think>.*?</think>\s*", "", content, flags=re.DOTALL
-    ).strip()
-    usage = getattr(response, "usage", None)
-    logger.info(
-        "ai.done type=%s input_tokens=%s output_tokens=%s response_chars=%d",
-        query_type,
-        getattr(usage, "prompt_tokens", "?"),
-        getattr(usage, "completion_tokens", "?"),
-        len(cleaned_content),
+    current = json.dumps(
+        {"title": dashboard.get("title"), "markdown": dashboard.get("markdown")},
+        indent=2,
     )
-    with open(cache_file, "w") as f:
-        json.dump({"response": cleaned_content}, f, indent=2)
-    return cleaned_content
+    try:
+        revised = llm.structured(
+            prompts.feedback_update(
+                section=str(feedback.get("contentType", "overview")),
+                feedback_text=str(feedback.get("feedbackText", "")),
+                positive=bool(feedback.get("isPositive", True)),
+                current=current,
+                summaries=summaries_text,
+            ),
+            Overview,
+            label="feedback",
+            use_cache=False,
+        )
+    except llm.AIQueryError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    dashboard["title"] = revised.title
+    dashboard["markdown"] = revised.markdown
+
+    text = json.dumps(dashboard, indent=2)
+    _dashboard_path(dashboard_id).write_text(text, encoding="utf-8")
+    (config.PROCESSED_DIR / f"{safe_id(dashboard_id)}_result.json").write_text(
+        text, encoding="utf-8"
+    )
+    return dashboard
 
 
-def generate_chat_response(
-    message: str,
-    dashboard_id: str,
-    markdown_text: str,
-    context: str,
-    chat_history: list,
-) -> str:
-    """
-    Generates a chat response using an AI prompt.
-    If the user's message contains keywords such as "chart", "graph", "visual", or "show",
-    the response will include a nested chart object with structured data.
-    """
-    prompt = f"""You are an expert AI assistant for underwriters. Given the real data provided below, answer the users chat messages to the best of your ability without giving any false data. Avoid reiterating common or trivial information. Emphasize aspects of the data that an underwriter must know for decision making. Never give any false data. Always double-check the numbers and make sure they are correct.
-
-Context:
-{context}
-
-Markdown input to analyze:
-{markdown_text}
-
-Previous chat history:
-{json.dumps(chat_history, indent=2)}
-
-Follow the JSON schema exactly.
-{{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Chat Response Schema",
-  "type": "object",
-  "properties": {{
-    "role": {{
-      "type": "string",
-      "description": "The role of the sender, e.g. 'assistant'"
-    }},
-    "content": {{
-      "type": "string",
-      "description": "The text response of the assistant"
-    }},
-    "timestamp": {{
-      "type": "string",
-      "format": "date-time",
-      "description": "The UTC timestamp of the response in ISO 8601 format"
-    }},
-    "chart": {{
-      "type": "object",
-      "description": "Optional chart object if the request mentions charts or visuals",
-      "properties": {{
-        "chartType": {{
-          "type": "string",
-          "enum": ["bar", "line", "pie"],
-          "description": "The type of the chart"
-        }},
-        "title": {{
-          "type": "string",
-          "description": "Title of the chart"
-        }},
-        "xAxisLabel": {{
-          "type": "string",
-          "description": "Label for the x-axis"
-        }},
-        "yAxisLabel": {{
-          "type": "string",
-          "description": "Label for the y-axis"
-        }},
-        "data": {{
-          "type": "array",
-          "description": "Data points for the chart",
-          "items": {{
-            "type": "object",
-            "properties": {{
-              "category": {{
-                "type": "string",
-                "description": "Category or label for the data point"
-              }},
-              "value": {{
-                "type": "number",
-                "description": "Numerical value for the data point"
-              }}
-            }},
-            "required": ["category", "value"]
-          }}
-        }}
-      }},
-      "required": ["chartType", "title", "xAxisLabel", "yAxisLabel", "data"]
-    }}
-  }},
-  "required": ["role", "content", "timestamp"],
-  "additionalProperties": false
-}}
-
-You are an AI assistant in a chat system. The user has sent the following message:
-"{message}"
-
-If the user’s message does not mention any chart related keywords (such as "chart", "graph", "visual", "show", or "display"), do not include the "chart" key in the JSON.
-
-Output only valid JSON following the structure above (omit comments) and ensure the timestamp is the current UTC time.
-Output only valid JSON following the schema.
-"""
-    # Using the cached_ai_query function to call the AI service.
-    return cached_ai_query(prompt, "chat", dashboard_id)
+# ---------------------------------------------------------------------------
+# Chat
+# ---------------------------------------------------------------------------
+def _chat_path(dashboard_id: str):
+    return config.AI_CACHED_DIR / f"{safe_id(dashboard_id)}_chat.json"
 
 
-@app.get("/dashboards/{dashboard_id}/chat")
-async def get_chat_history(dashboard_id: str = Path(...)):
-    """
-    Returns the chat history for the given dashboard.
-    """
-    if not os.path.exists(AI_CACHED_DIR):
+def _load_chat(dashboard_id: str) -> List[dict]:
+    path = _chat_path(dashboard_id)
+    if not path.exists():
         return []
-    chat_history = []
-    chat_file = os.path.join(AI_CACHED_DIR, f"{dashboard_id}_chat.json")
-    if os.path.exists(chat_file):
-        with open(chat_file, "r") as f:
-            chat_history = json.load(f)
-    return chat_history
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        logger.warning("chat.history_corrupt dashboard=%s", dashboard_id)
+        return []
 
 
-@app.post("/dashboards/{dashboard_id}/chat")
-def send_chat_message(dashboard_id: str = Path(...), payload: dict = Body(...)):
-    """
-    Accepts a new chat message and generates an AI response.
-    Expects a JSON body with a "message" key.
+def _save_chat(dashboard_id: str, history: List[dict]) -> None:
+    _chat_path(dashboard_id).write_text(
+        json.dumps(history, indent=2), encoding="utf-8"
+    )
 
-    BUG-005: declared `def`, not `async def`, on purpose. Every call below is
-    blocking (file I/O, local model inference, the OpenAI request). As an
-    `async def` this ran on the event loop and froze the whole API - a 0.9 ms
-    /submissions request was measured taking 7.6 s during a single chat call.
-    FastAPI runs sync handlers in a threadpool instead.
-    """
-    message_text = payload.get("message", "").strip()
+
+def _render_history(history: List[dict], limit: int = 10) -> str:
+    """COST-002: only the recent turns are sent, not an unbounded transcript."""
+    recent = history[-limit:]
+    return "\n\n".join(f"{m.get('role')}: {m.get('content', '')}" for m in recent)
+
+
+@app.get("/dashboards/{dashboard_id}/chat", dependencies=[Depends(require_token)])
+def get_chat_history(dashboard_id: str = PathParam(...)) -> List[dict]:
+    return _load_chat(dashboard_id)
+
+
+@app.delete("/dashboards/{dashboard_id}/chat", dependencies=[Depends(require_token)])
+def delete_chat_history(dashboard_id: str = PathParam(...)) -> dict:
+    path = _chat_path(dashboard_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Chat history not found.")
+    path.unlink()
+    return {"status": "success", "message": "Chat history deleted."}
+
+
+def _prepare_chat(dashboard_id: str, message_text: str):
+    submission_id = submission_id_from_dashboard(dashboard_id)
+    if not (config.SUBMISSIONS_DIR / submission_id).is_dir():
+        raise HTTPException(status_code=404, detail="Submission folder not found")
+
+    history = _load_chat(dashboard_id)
+    summaries_text = pipeline.load_summaries_text(submission_id)
+    try:
+        context = retrieval.build_context(f"{summaries_text}\n\n{message_text}")
+    except retrieval.IndexMissingError:
+        context = ""
+    prompt = prompts.chat_answer(
+        message_text, summaries_text, context, _render_history(history)
+    )
+    return history, prompt
+
+
+@app.post("/dashboards/{dashboard_id}/chat", dependencies=[Depends(require_token)])
+def send_chat_message(
+    dashboard_id: str = PathParam(...), payload: dict = Body(...)
+) -> dict:
+    """Non-streaming chat. BUG-005: sync handler - all work below blocks."""
+    message_text = str(payload.get("message", "")).strip()
     if not message_text:
         raise HTTPException(status_code=400, detail="Message text is required.")
 
-    # Determine the file path for storing the chat history.
-    chat_file = os.path.join(AI_CACHED_DIR, f"{dashboard_id}_chat.json")
+    try:
+        history, prompt = _prepare_chat(dashboard_id, message_text)
+        answer = "".join(llm.stream_text(prompt, label="chat"))
+        chart = _maybe_chart(message_text, answer)
+    except llm.AIQueryError as e:
+        raise HTTPException(status_code=502, detail=f"Error querying the AI: {e}")
 
-    # Load existing chat history from file, or initialize an empty list if the file does not exist.
-    if os.path.exists(chat_file):
-        with open(chat_file, "r") as f:
-            chat_history = json.load(f)
-    else:
-        chat_history = []
+    return _append_exchange(dashboard_id, history, message_text, answer, chart)
 
-    # Create the user message and append it to the chat history.
-    user_message = {
-        "role": "user",
-        "content": message_text,
+
+def _maybe_chart(message_text: str, answer: str) -> Optional[dict]:
+    keywords = ("chart", "graph", "visual", "show", "display", "plot")
+    if not any(word in message_text.lower() for word in keywords):
+        return None
+    try:
+        decision = llm.structured(
+            prompts.chat_chart(message_text, answer),
+            ChatChartDecision,
+            label="chat:chart",
+            use_cache=False,
+        )
+    except llm.AIQueryError as e:
+        logger.warning("chat.chart_failed error=%s", e)
+        return None
+    if decision.wants_chart and decision.chart and decision.chart.data:
+        return decision.chart.model_dump()
+    return None
+
+
+def _append_exchange(
+    dashboard_id: str,
+    history: List[dict],
+    message_text: str,
+    answer: str,
+    chart: Optional[dict],
+) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    history.append({"role": "user", "content": message_text, "timestamp": now})
+    assistant = {
+        "role": "assistant",
+        "content": answer,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    chat_history.append(user_message)
+    if chart:
+        assistant["chart"] = chart
+    history.append(assistant)
+    _save_chat(dashboard_id, history)
+    return assistant
 
-    # Read the markdown text and context for the dashboard.
-    submission_id = dashboard_id.split("_")[0]
-    submission_folder = os.path.join(SUBMISSIONS_DIR, submission_id)
-    if not os.path.exists(submission_folder):
-        raise HTTPException(status_code=404, detail="Submission folder not found")
-    markdown_text = read_all_files_from_folder(submission_folder)
-    context = get_top_k_related_files_contents(markdown_text, k=5)
-    context += "\n\n" + get_top_k_related_files_contents(
-        "\n".join([chat["content"] for chat in chat_history]), k=5
-    )
-    if not context:
-        raise HTTPException(status_code=404, detail="Context not found")
 
-    # Generate AI response based on the user message.
-    try:
-        ai_response_str = generate_chat_response(
-            message_text, dashboard_id, markdown_text, context, chat_history
-        )
-    except AIQueryError as e:
-        raise HTTPException(status_code=502, detail=f"Error querying the AI: {e}")
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
-    try:
-        ai_response = clean_and_parse_json(ai_response_str)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Invalid JSON from AI response: {e}"
-        )
 
-    # Append the AI response to the chat history.
-    chat_history.append(ai_response)
+@app.post("/dashboards/{dashboard_id}/chat/stream", dependencies=[Depends(require_token)])
+def stream_chat_message(
+    dashboard_id: str = PathParam(...), payload: dict = Body(...)
+) -> StreamingResponse:
+    """IMP-003: stream the answer as it is produced.
 
-    # Save the updated chat history back to the file.
-    with open(chat_file, "w") as f:
-        json.dump(chat_history, f, indent=2)
-
-    return ai_response
-
-
-def generate_overview(markdown_text: str, submission_id: str, context: str) -> str:
-    prompt = f"""
-You are an expert AI assistant for underwriters. Given the real data provided below, generate an analysis overview that highlights only the most critical and non-obvious risk indicators and key findings. Avoid reiterating common or trivial information. Emphasize aspects of the data that an underwriter must know for decision making.
-
-Context:
-{context}
-
-Markdown input to analyze:
-{markdown_text}
-
-Follow the JSON schema exactly.
-
-JSON Schema:
-{{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "AI Overview Schema",
-  "type": "object",
-  "required": ["title", "markdown"],
-  "properties": {{
-    "title": {{"type": "string", "description": "The main title of the analysis report"}},
-    "markdown": {{"type": "string", "description": "Markdown-formatted summary focusing on critical non-obvious insights"}}
-  }}
-}}
-
-Output only valid JSON following the schema.
-"""
-    return cached_ai_query(prompt, "overview", submission_id)
-
-
-def generate_key_insights(markdown_text: str, submission_id: str, context: str) -> str:
-    prompt = f"""
-You are an expert in data analysis for underwriting. Analyze the real input data and extract only the most significant, non-obvious insights that affect risk or performance. Avoid repeating common observations; instead, focus on critical trends, anomalies, or risks an underwriter must evaluate.
-
-
-Context:
-{context}
-
-Markdown input to analyze:
-{markdown_text}
-
-Follow the JSON schema exactly.
-
-JSON Schema:
-{{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Key Insights Schema",
-  "type": "array",
-  "description": "A list of important insights derived from the data analysis",
-  "items": {{
-    "type": "object",
-    "required": ["title", "description", "impact", "confidence"],
-    "properties": {{
-      "title": {{"type": "string", "description": "Insight headline"}},
-      "description": {{"type": "string", "description": "Detailed explanation emphasizing non-obvious critical data points"}},
-      "impact": {{"type": "string", "enum": ["positive", "negative"], "description": "Overall effect on risk/performance"}},
-      "confidence": {{"type": "number", "minimum": 0, "maximum": 1, "description": "Reliability score"}}
-    }}
-  }}
-}}
-
-Return only valid JSON strictly adhering to the schema.
-"""
-    return cached_ai_query(prompt, "key_insights", submission_id)
-
-
-def generate_tabs(markdown_text: str, submission_id: str, context: str) -> str:
-    prompt = f"""
-You are an expert data analyst for underwriting reports. Based on the provided data, generate a collection of dashboard tabs that highlight advanced visualizations and analysis. Ensure the output focuses on the most critical data points required for underwriting and avoids stating the obvious.
-
-Context:
-{context}
-
-Markdown input to analyze:
-{markdown_text}
-
-Follow the JSON schema exactly.
-
-JSON Schema:
-{{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Tabs Schema",
-  "type": "array",
-  "description": "Dashboard tabs representing major analytical focus areas",
-  "items": {{
-    "type": "object",
-    "required": ["id", "title", "content"],
-    "properties": {{
-      "id": {{"type": "string", "description": "Unique tab identifier"}},
-      "title": {{"type": "string", "description": "Tab title for the UI"}},
-      "content": {{
-        "type": "object",
-        "required": ["type", "data"],
-        "properties": {{
-          "type": {{"type": "string", "enum": ["json", "html"], "description": "Format of the content"}},
-          "data": {{
-            "description": "Content details which could be a JSON chart or HTML summary",
-            "oneOf": [
-              {{
-                "type": "object",
-                "required": ["chartType", "title", "description", "data"],
-                "properties": {{
-                  "chartType": {{"type": "string", "enum": ["bar", "line", "pie"]}},
-                  "title": {{"type": "string"}},
-                  "description": {{"type": "string"}},
-                  "xAxisLabel": {{"type": "string"}},
-                  "yAxisLabel": {{"type": "string"}},
-                  "data": {{
-                    "type": "array",
-                    "items": {{
-                      "type": "object",
-                      "properties": {{
-                        "value": {{"type": "number", "description": "Numerical value"}}
-                      }},
-                      "required": ["value"],
-                      "minProperties": 2
-                    }}
-                  }}
-                }}
-              }},
-              {{
-                "type": "string",
-                "description": "HTML formatted content"
-              }}
-            ]
-          }}
-        }}
-      }}
-    }}
-  }}
-}}
-Return only valid JSON following the schema.
-"""
-    return cached_ai_query(prompt, "tabs", submission_id)
-
-
-# -----------------------------
-# Utility: File Reading and JSON Parsing
-# -----------------------------
-def read_all_files_from_folder(folder_name: str) -> str:
-    if not os.path.exists(folder_name):
-        raise FileNotFoundError(f"Folder '{folder_name}' does not exist.")
-    if not os.path.isdir(folder_name):
-        raise NotADirectoryError(f"'{folder_name}' is not a directory.")
-
-    combined_text = ""
-    for file_name in os.listdir(folder_name):
-        file_path = os.path.join(folder_name, file_name)
-        if os.path.isfile(file_path):
-            try:
-                with open(file_path, encoding="utf8") as f:
-                    combined_text += f.read() + "\n\n"
-            except Exception as e:
-                raise Exception(f"Error reading file {file_path}: {e}")
-    return combined_text.strip()
-
-
-def clean_and_parse_json(text: str):
-    text = re.sub(r"```json\s*|```\s*", "", text).strip()
-    text = re.sub(r"([{,]\s*)(\w+)(\s*:)", r'\1"\2"\3', text)
-    text = re.sub(r':\s*"([^"]*)"([^,\]}])', r': "\1"\2', text)
-    text = re.sub(r",\s*([\]}])", r"\1", text)
-    try:
-        return json.loads(text)
-    except Exception as error:
-        print("Error parsing JSON:", error)
-        print("Cleaned text was:", text)
-        raise error
-
-
-# -----------------------------
-# Background Task: Process Submission
-# -----------------------------
-def _fail(submission_id: str, progress: dict, stage: str, error: Exception):
-    progress["status"] = "failed"
-    progress["error"] = f"{stage}: {error}"
-    logger.error("job.failed submission=%s stage=%s error=%s", submission_id, stage, error)
-    save_progress(submission_id, progress)
-
-
-def process_submission_task(submission_id: str):
-    # Initialize progress
-    progress = load_progress(submission_id)
-    progress.update({"status": "processing", "progress": 0, "results": {}})
-    progress.pop("error", None)
-    save_progress(submission_id, progress)
-
-    submission_folder = os.path.join(SUBMISSIONS_DIR, submission_id)
-    if not os.path.exists(submission_folder):
-        _fail(submission_id, progress, "setup", FileNotFoundError(submission_folder))
-        return
-
-    try:
-        markdown_text = read_all_files_from_folder(submission_folder)
-        context = get_top_k_related_files_contents(markdown_text, k=10)
-    except Exception as e:
-        _fail(submission_id, progress, "retrieval", e)
-        return
-
-    # IMP-001: the three generations are independent - none consumes another's
-    # output - so they run concurrently instead of end to end. Wall clock goes
-    # from t1+t2+t3 to max(t1,t2,t3).
-    generators = {
-        "overview": generate_overview,
-        "keyInsights": generate_key_insights,
-        "tabs": generate_tabs,
-    }
-    raw = {}
-    with ThreadPoolExecutor(max_workers=len(generators)) as pool:
-        futures = {
-            pool.submit(fn, markdown_text, submission_id, context): name
-            for name, fn in generators.items()
-        }
-        done_count = 0
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                raw[name] = future.result()
-            except Exception as e:
-                _fail(submission_id, progress, f"generate:{name}", e)
-                return
-            done_count += 1
-            progress["progress"] = int(done_count / len(generators) * 100)
-            save_progress(submission_id, progress)
-
-    try:
-        overview = clean_and_parse_json(raw["overview"])
-        key_insights = clean_and_parse_json(raw["keyInsights"])
-        tabs = clean_and_parse_json(raw["tabs"])
-    except Exception as e:
-        _fail(submission_id, progress, "parse", e)
-        return
-
-    final_result = {
-        "title": overview.get("title", ""),
-        "markdown": overview.get("markdown", ""),
-        "keyInsights": key_insights,
-        "tabs": tabs,
-    }
-
-    # Persist the dashboard BEFORE announcing completion, otherwise the UI can
-    # follow the "completed" status to a dashboard file that does not exist yet.
-    try:
-        final_result_path = os.path.join(PROCESSED_DIR, f"{submission_id}_result.json")
-        with open(final_result_path, "w") as f:
-            f.write(json.dumps(final_result, indent=2))
-        dashboard_path = os.path.join(AI_CACHED_DIR, f"{submission_id}_dashboard.json")
-        with open(dashboard_path, "w") as f:
-            f.write(json.dumps(final_result, indent=2))
-    except Exception as e:
-        _fail(submission_id, progress, "persist", e)
-        return
-
-    progress["results"] = {
-        "overview": overview,
-        "keyInsights": key_insights,
-        "tabs": tabs,
-    }
-    progress["progress"] = 100
-    progress["status"] = "completed"
-    save_progress(submission_id, progress)
-    logger.info("job.completed submission=%s", submission_id)
-
-
-# -----------------------------
-# Async Process Submission Endpoint (Now Launches a Background Task)
-# -----------------------------
-@app.post("/submissions/{submission_id}/process")
-async def process_submission_endpoint(
-    submission_id: str = Path(...), background_tasks: BackgroundTasks = None
-):
-    # Launch the processing in the background without waiting for it to complete.
-    background_tasks.add_task(process_submission_task, submission_id)
-    return {"submission_id": submission_id, "status": "processing started"}
-
-
-# -----------------------------
-# AI Response to Feedback Endpoint
-# -----------------------------
-def generate_feedback_response(
-    feedback: dict, current_dashboard: dict, context: str, markdown_text: str
-) -> str:
-    prompt = f"""
-You are an expert AI assistant specialized in generating underwriting reports. Your task is to update only the parts of the dashboard that are directly related to the user feedback while leaving all other sections completely unchanged.
-
-Please follow these instructions precisely:
-1. Output a complete and valid JSON document that follows the original dashboard schema.
-2. Only modify the specific section identified by the feedback's 'contentId' and 'contentType'; do not alter any sections not mentioned in the feedback.
-3. Preserve any content that is unrelated to the feedback.
-4. For the updated section, incorporate the feedback in a way that is data-grounded and reflects only non-trivial improvements.
-5. Do not reiterate or modify any information that is already correct and does not conflict with the feedback.
-6. Ensure that the modifications are consistent with underwriting principles and highlight only critical insights.
-7. Use concise, precise language that eliminates redundant or obvious details.
-8. Ensure that any statistical or numeric data present remains unchanged unless it is explicitly targeted in the feedback.
-9. Provide a clear and improved version of the targeted section that reflects the user's suggestions while keeping all other sections intact.
-10. Do not provide any explanations or commentary; output only the updated JSON.
-11. Double-check that the final output meets all the JSON schema requirements as defined in the original dashboard.
-
-Current Dashboard:
-{json.dumps(current_dashboard, indent=2)}
-
-Submission Context:
-{context}
-
-Original Markdown Data:
-{markdown_text}
-
-User Feedback:
-{json.dumps(feedback, indent=2)}
-
-Task:
-Based on the above information, update only the relevant parts of the dashboard content according to the feedback. Do not modify any data that is not impacted by the feedback. Focus on the critical, non-obvious data points that an underwriter must know, and avoid reiterating trivial or obvious information.
-Follow the JSON schema exactly.
-
-JSON Schema:
-{{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Updated Dashboard Schema",
-  "type": "object",
-  "required": ["title", "markdown", "keyInsights", "tabs"],
-  "properties": {{
-    "title": {{"type": "string", "description": "The main title of the analysis report"}},
-    "markdown": {{"type": "string", "description": "Markdown-formatted summary focusing on critical non-obvious insights"}},
-    "keyInsights": {{
-      "type": "array",
-      "description": "A list of important insights derived from the data analysis",
-      "items": {{
-        "type": "object",
-        "required": ["title", "description", "impact", "confidence"],
-        "properties": {{
-          "title": {{"type": "string", "description": "Insight headline"}},
-          "description": {{"type": "string", "description": "Detailed explanation emphasizing non-obvious critical data points"}},
-          "impact": {{"type": "string", "enum": ["positive", "negative"], "description": "Overall effect on risk/performance"}},
-          "confidence": {{"type": "number", "minimum": 0, "maximum": 1, "description": "Reliability score"}}
-        }}
-      }}
-    }},
-    "tabs": {{
-      "type": "array",
-      "description": "Dashboard tabs representing major analytical focus areas",
-      "items": {{
-        "type": "object",
-        "required": ["id", "title", "content"],
-        "properties": {{
-          "id": {{"type": "string", "description": "Unique tab identifier"}},
-          "title": {{"type": "string", "description": "Tab title for the UI"}},
-          "content": {{
-            "type": "object",
-            "required": ["type", "data"],
-            "properties": {{
-              "type": {{"type": "string", "enum": ["json", "html"], "description": "Format of the content"}},
-              "data": {{
-                "description": "Content details which could be a JSON chart or HTML summary",
-                "oneOf": [
-                  {{
-                    "type": "object",
-                    "required": ["chartType", "title", "description", "data"],
-                    "properties": {{
-                      "chartType": {{"type": "string", "enum": ["bar", "line", "pie"]}},
-                      "title": {{"type": "string"}},
-                      "description": {{"type": "string"}},
-                      "xAxisLabel": {{"type": "string"}},
-                      "yAxisLabel": {{"type": "string"}},
-                      "data": {{
-                        "type": "array",
-                        "items": {{
-                          "type": "object",
-                          "properties": {{
-                            "value": {{"type": "number", "description": "Numerical value"}}
-                          }},
-                          "required": ["value"],
-                          "minProperties": 2
-                        }}
-                      }}
-                    }}
-                  }},
-                  {{
-                    "type": "string",
-                    "description": "HTML formatted content"
-                  }}
-                ]
-              }}
-            }}
-          }}
-        }}
-      }}
-    }}
-  }}
-}}
-
-Output a complete updated dashboard in valid JSON, strictly following the schema, while only changing the fields that are impacted by the feedback.
-"""
-    return cached_ai_query(
-        prompt, "feedback_response", current_dashboard.get("title", "feedback")
-    )
-
-
-@app.post("/dashboards/{dashboard_id}/ai-response")
-def get_ai_response_to_feedback(
-    dashboard_id: str = Path(...), feedback: dict = Body(...)
-):
-    # BUG-005: sync on purpose - see send_chat_message.
-    dashboard_path = os.path.join(AI_CACHED_DIR, f"{dashboard_id}.json")
-    if not os.path.exists(dashboard_path):
-        raise HTTPException(status_code=404, detail="Dashboard not found")
-    with open(dashboard_path, "r") as f:
-        current_dashboard = json.load(f)
-
-    submission_id = dashboard_id.split("_")[0]
-    submission_folder = os.path.join(SUBMISSIONS_DIR, submission_id)
-    if not os.path.exists(submission_folder):
-        raise HTTPException(status_code=404, detail="Submission folder not found")
-    markdown_text = read_all_files_from_folder(submission_folder)
-    context = get_top_k_related_files_contents(markdown_text, k=10)
-    if not context:
-        raise HTTPException(status_code=404, detail="Context not found")
-
-    try:
-        updated_response_str = generate_feedback_response(
-            feedback, current_dashboard.copy(), context, markdown_text
-        )
-    except AIQueryError as e:
-        raise HTTPException(status_code=502, detail=f"Error querying the AI: {e}")
-
-    try:
-        updated_dashboard = clean_and_parse_json(updated_response_str)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Error processing AI feedback: {e}"
-        )
-
-    with open(dashboard_path, "w") as f:
-        f.write(json.dumps(updated_dashboard, indent=2))
-    processed_result_path = os.path.join(PROCESSED_DIR, f"{dashboard_id}_result.json")
-    with open(processed_result_path, "w") as f:
-        f.write(json.dumps(updated_dashboard, indent=2))
-
-    return updated_dashboard
-
-
-# Extend FPDF to support HTML rendering.
-class PDF(FPDF, HTMLMixin):
-    pass
-
-
-def render_chart(chart_data):
+    Total duration is unchanged; time-to-first-word drops from the length of the
+    whole call to a couple of seconds, which is most of the perceived problem.
     """
-    Renders a chart based on chart_data and returns the path of the saved image.
-    """
-    chart_type = chart_data.get("chartType")
-    data_points = chart_data.get("data", [])
+    message_text = str(payload.get("message", "")).strip()
+    if not message_text:
+        raise HTTPException(status_code=400, detail="Message text is required.")
 
-    # Extract values and labels from data points.
-    values = [pt.get("value") for pt in data_points]
-    labels = []
-    for pt in data_points:
-        extras = {k: v for k, v in pt.items() if k != "value"}
-        label = next(iter(extras.values())) if extras else ""
-        labels.append(label)
+    history, prompt = _prepare_chat(dashboard_id, message_text)
 
-    plt.figure(figsize=(6, 4))
-    plt.title(chart_data.get("title", "Chart"))
-    if chart_type == "bar":
-        plt.bar(labels, values, color="skyblue")
-        plt.xlabel(chart_data.get("xAxisLabel", ""))
-        plt.ylabel(chart_data.get("yAxisLabel", ""))
-    elif chart_type == "line":
-        plt.plot(labels, values, marker="o", linestyle="-", color="green")
-        plt.xlabel(chart_data.get("xAxisLabel", ""))
-        plt.ylabel(chart_data.get("yAxisLabel", ""))
-    elif chart_type == "pie":
-        plt.pie(values, labels=labels, autopct="%1.1f%%")
-    else:
-        plt.text(0.5, 0.5, "Unsupported chart type", ha="center")
-
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    plt.tight_layout()
-    plt.savefig(temp_file.name, format="png")
-    plt.close()
-    return temp_file.name
-
-
-def render_html_to_text(html_content):
-    """
-    Converts HTML content to plain text.
-    """
-    soup = BeautifulSoup(html_content, "html.parser")
-    return soup.get_text(separator="\n")
-
-
-def generate_report(data, output_format="pdf", output_filepath="report"):
-    """
-    Generates a PDF or TXT report from JSON data conforming to the provided schemas.
-
-    Parameters:
-        data (dict): JSON data with keys "overview", "keyInsights", and "tabs".
-        output_format (str): 'pdf' or 'txt'
-        output_filepath (str): Path (without extension) for output file.
-    """
-    report_lines = []
-
-    # Overview Section.
-    report_lines.append(f"=== {data.get('title', 'Overview Report')} ===\n")
-    report_lines.append("Markdown Summary:\n")
-    report_lines.append(data.get("markdown", "No overview markdown provided.") + "\n")
-
-    # Key Insights Section.
-    key_insights = data.get("keyInsights", [])
-    report_lines.append("=== Key Insights ===\n")
-    if key_insights:
-        for insight in key_insights:
-            report_lines.append(f"* {insight.get('title','No Title')}")
-            report_lines.append(
-                f"  Description: {insight.get('description','No Description')}"
+    def generate():
+        collected: List[str] = []
+        try:
+            for piece in llm.stream_text(prompt, label="chat:stream"):
+                collected.append(piece)
+                yield _sse("token", {"text": piece})
+            answer = "".join(collected)
+            chart = _maybe_chart(message_text, answer)
+            assistant = _append_exchange(
+                dashboard_id, history, message_text, answer, chart
             )
-            report_lines.append(f"  Impact: {insight.get('impact','N/A')}")
-            report_lines.append(f"  Confidence: {insight.get('confidence',0)}\n")
-    else:
-        report_lines.append("No key insights available.\n")
+            if chart:
+                yield _sse("chart", chart)
+            yield _sse("done", assistant)
+        except llm.AIQueryError as e:
+            yield _sse("error", {"detail": str(e)})
+        except Exception as e:  # never leave the stream hanging open
+            logger.exception("chat.stream_failed dashboard=%s", dashboard_id)
+            yield _sse("error", {"detail": f"{type(e).__name__}: {e}"})
 
-    # Tabs Section.
-    tabs = data.get("tabs", [])
-    report_lines.append("=== Dashboard Tabs ===\n")
-    for tab in tabs:
-        report_lines.append(f"[{tab.get('id')}] {tab.get('title','No Title')}")
-        content = tab.get("content", {})
-        content_type = content.get("type", "N/A")
-        if content_type == "json":
-            report_lines.append("Chart Content: (Rendered as graph below)")
-        elif content_type == "html":
-            html_plain = render_html_to_text(content.get("data", ""))
-            report_lines.append("HTML Content Rendered:")
-            report_lines.append(html_plain)
-        report_lines.append("")
-
-    report_text = "\n".join(report_lines)
-
-    if output_format.lower() == "txt":
-        output_file = output_filepath + ".txt"
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(report_text)
-        return output_file
-
-    elif output_format.lower() == "pdf":
-        pdf = PDF()
-        pdf.add_page()
-        pdf.add_font("DejaVu", "", "./fonts/DejaVuSerif.ttf", uni=True)
-        pdf.set_font("DejaVu", "", 12)
-        pdf.set_auto_page_break(auto=True, margin=15)
-
-        # Write header report text.
-        for line in report_text.split("\n"):
-            pdf.multi_cell(0, 10, line)
-
-        # Process each tab for rendering charts or HTML.
-        for tab in tabs:
-            content = tab.get("content", {})
-            content_type = content.get("type", "N/A")
-            pdf.ln(10)
-            pdf.cell(0, 10, f"Tab: {tab.get('title','No Title')}", ln=True)
-
-            if content_type == "json":
-                chart_data = content.get("data", {})
-                image_path = render_chart(chart_data)
-                pdf.ln(5)
-                try:
-                    pdf.image(image_path, w=pdf.w / 2)
-                except RuntimeError as e:
-                    pdf.multi_cell(0, 10, f"Error rendering chart: {e}")
-                finally:
-                    os.remove(image_path)
-                pdf.multi_cell(
-                    0, 10, f"Description: {chart_data.get('description', '')}"
-                )
-            elif content_type == "html":
-                html_content = content.get("data", "")
-                pdf.ln(5)
-                try:
-                    pdf.write_html(html_content)
-                except Exception:
-                    plain_text = render_html_to_text(html_content)
-                    pdf.multi_cell(0, 10, plain_text)
-            else:
-                pdf.multi_cell(0, 10, "Unsupported content type.")
-
-        output_file = output_filepath + ".pdf"
-        pdf.output(output_file)
-        return output_file
-    else:
-        raise ValueError("Unsupported output format. Choose 'pdf' or 'txt'.")
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
-@app.post("/generate-pdf")
+# ---------------------------------------------------------------------------
+# Retrieval
+# ---------------------------------------------------------------------------
+class RelatedFile(BaseModel):
+    filename: str
+    confidence: float
+
+
+class InputTextRequest(BaseModel):
+    input_text: str
+    k: int = 5
+
+
+@app.post(
+    "/top_k_related_files",
+    response_model=List[RelatedFile],
+    dependencies=[Depends(require_token)],
+)
+def top_k_related_files(request: InputTextRequest) -> List[RelatedFile]:
+    try:
+        results = retrieval.search_files(request.input_text, request.k)
+    except retrieval.IndexMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return [RelatedFile(filename=name, confidence=score) for name, score in results]
+
+
+@app.post(
+    "/top_k_related_files_contents",
+    response_class=PlainTextResponse,
+    dependencies=[Depends(require_token)],
+)
+def top_k_related_files_contents(request: InputTextRequest) -> str:
+    try:
+        return retrieval.build_context(request.input_text, k=request.k)
+    except retrieval.IndexMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get(
+    "/get-file-contents",
+    response_class=PlainTextResponse,
+    dependencies=[Depends(require_token)],
+)
+def get_file_contents(filename: str) -> str:
+    """SEC-001: confined to the corpus directory. `?filename=../../../etc/passwd`
+    used to return /etc/passwd from an unauthenticated endpoint."""
+    try:
+        path = retrieval.resolve_within_corpus(filename)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found.")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading file: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+@app.post("/generate-pdf", dependencies=[Depends(require_token)])
 def generate_report_endpoint(
     payload: dict,
     output_format: str = Query("pdf", description="Output format: 'pdf' or 'txt'"),
-):
-    """
-    Generates a report from JSON payload conforming to the expected schemas.
-    Returns the generated file (PDF or TXT).
-
-    BUG-016: sync handler - matplotlib rendering and FPDF output block.
-    """
+) -> FileResponse:
+    """BUG-016: sync handler - rendering blocks. BUG-015: unique output path."""
     if output_format.lower() not in ("pdf", "txt"):
-        raise HTTPException(
-            status_code=400, detail="output_format must be 'pdf' or 'txt'"
-        )
-    # BUG-015: a fixed filename let concurrent exports overwrite each other and
-    # allowed one user to download another user's report.
+        raise HTTPException(status_code=400, detail="output_format must be 'pdf' or 'txt'")
+
     temp_dir = tempfile.mkdtemp(prefix="report_")
-    output_filepath = os.path.join(temp_dir, "report_output")
-    file_path = generate_report(
-        payload, output_format=output_format, output_filepath=output_filepath
+    file_path = report.generate_report(
+        payload,
+        output_format=output_format,
+        output_filepath=os.path.join(temp_dir, "report_output"),
     )
-    # Set the appropriate media_type.
     media_type = "application/pdf" if output_format.lower() == "pdf" else "text/plain"
     return FileResponse(
         path=file_path, media_type=media_type, filename=os.path.basename(file_path)
     )
 
 
-# -----------------------------
-# Main Execution
-# -----------------------------
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=config.HOST, port=config.PORT)

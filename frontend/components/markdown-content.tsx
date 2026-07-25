@@ -97,10 +97,15 @@ export default function MarkdownContent({ content, dashboardId, onReportUpdated 
     try {
       setIsSubmitting(true)
 
+      // BUG-018: Date.now() was evaluated twice, milliseconds apart, so the
+      // feedback record and the follow-up request carried different ids and
+      // could not be correlated.
+      const contentId = `selection-${Date.now()}`
+
       // Submit feedback to the AI service
       await aiService.submitFeedback({
         dashboardId,
-        contentId: `selection-${Date.now()}`,
+        contentId,
         contentType: "text",
         feedbackText,
         isPositive,
@@ -110,7 +115,7 @@ export default function MarkdownContent({ content, dashboardId, onReportUpdated 
       // Get AI response to feedback
       const aiResponse = await aiService.getAIResponseToFeedback({
         dashboardId,
-        contentId: `selection-${Date.now()}`,
+        contentId,
         contentType: "text",
         feedbackText,
         isPositive,

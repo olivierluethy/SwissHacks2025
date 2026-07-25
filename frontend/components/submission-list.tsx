@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { aiService } from "@/services/ai.service"
-import { FileText, AlertTriangle, CheckCircle, Clock, RefreshCw, Play, Loader2, FileSearch } from "lucide-react"
+import { FileText, AlertTriangle, CheckCircle, Clock, RefreshCw, Play, Loader2, FileSearch, X } from "lucide-react"
 
 type SubmissionStatus = "pending_analysis" | "analyzing" | "pending_review" | "failed"
 
@@ -13,6 +13,7 @@ type Submission = {
   status: SubmissionStatus
   dashboardId?: string
   progress?: number
+  step?: string
   error?: string
 }
 
@@ -109,6 +110,16 @@ export default function SubmissionList() {
     }
   }
 
+  const cancelSubmission = async (submissionId: string) => {
+    try {
+      await aiService.cancelSubmission(submissionId)
+      await updateSubmissionStatus(submissionId)
+    } catch (err) {
+      console.error("Error cancelling submission:", err)
+      setError("Failed to cancel the analysis")
+    }
+  }
+
   const updateSubmissionStatus = async (submissionId: string) => {
     try {
       const status = await aiService.getProcessingStatus(submissionId)
@@ -121,6 +132,7 @@ export default function SubmissionList() {
                 status: mapStatus(status.status),
                 dashboardId: status.dashboardId,
                 progress: status.progress,
+                step: status.step ?? undefined,
                 error: status.error ?? undefined,
               }
             : sub,
@@ -271,6 +283,10 @@ export default function SubmissionList() {
                           {submission.error}
                         </div>
                       )}
+                      {/* IMP-009: what the job is actually doing, not just a % */}
+                      {submission.status === "analyzing" && submission.step && (
+                        <div className="text-xs text-blue-600 mt-1">{submission.step}</div>
+                      )}
                     </div>
                   </div>
                 </td>
@@ -311,9 +327,20 @@ export default function SubmissionList() {
                       )}
                     </button>
                   ) : submission.status === "analyzing" ? (
-                    <div className="inline-flex items-center px-4 py-2 bg-blue-100 text-blue-800 rounded-md">
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      <span>Analyzing...</span>
+                    <div className="inline-flex items-center space-x-2">
+                      <div className="inline-flex items-center px-4 py-2 bg-blue-100 text-blue-800 rounded-md">
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        <span>Analyzing...</span>
+                      </div>
+                      {/* IMP-010: a run used to be unstoppable once started. */}
+                      <button
+                        className="inline-flex items-center px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md"
+                        onClick={() => cancelSubmission(submission.id)}
+                        title="Stop this analysis"
+                      >
+                        <X className="w-4 h-4 mr-1" />
+                        <span>Cancel</span>
+                      </button>
                     </div>
                   ) : (
                     <button

@@ -1,5 +1,16 @@
 *.pyc
+__pycache__/
 .venv/
+.pytest_cache/
+
+# Runtime state and build artifacts (recreated on boot / by scripts)
 backend/data/ai_cached
+backend/data/llm_cache
 backend/data/progress
+backend/data/feedback
+backend/data/index
+backend/data/jobs.sqlite3*
 backend/processed
+backend/uploads
+backend/processing
+backend/analysis
