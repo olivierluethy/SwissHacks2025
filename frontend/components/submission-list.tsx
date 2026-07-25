@@ -3,13 +3,18 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { aiService } from "@/services/ai.service"
-import { FileText, AlertTriangle, CheckCircle, Clock, RefreshCw, Play, Loader2, FileSearch } from "lucide-react"
+import { FileText, AlertTriangle, CheckCircle, Clock, RefreshCw, Play, Loader2, FileSearch, X } from "lucide-react"
+
+type SubmissionStatus = "pending_analysis" | "analyzing" | "pending_review" | "failed"
 
 type Submission = {
   id: string
   name: string
-  status: "pending_analysis" | "analyzing" | "pending_review"
+  status: SubmissionStatus
   dashboardId?: string
+  progress?: number
+  step?: string
+  error?: string
 }
 
 export default function SubmissionList() {
@@ -50,6 +55,8 @@ export default function SubmissionList() {
         ...sub,
         status: mapStatus(sub.status),
       }))
+      // BUG-008: a run already in flight when the page loads must resume
+      // polling. It previously arrived as "pending" and polling never started.
 
       setSubmissions(mappedData)
     } catch (err) {
@@ -60,8 +67,10 @@ export default function SubmissionList() {
     }
   }
 
-  // Map old status values to new ones
-  const mapStatus = (oldStatus: string): "pending_analysis" | "analyzing" | "pending_review" => {
+  // Map backend status values to UI states.
+  // BUG-007: "failed" used to fall through to "pending_analysis", so a run that
+  // died after several minutes was indistinguishable from one never started.
+  const mapStatus = (oldStatus: string): SubmissionStatus => {
     switch (oldStatus) {
       case "pending":
         return "pending_analysis"
@@ -69,6 +78,8 @@ export default function SubmissionList() {
         return "analyzing"
       case "completed":
         return "pending_review"
+      case "failed":
+        return "failed"
       default:
         return "pending_analysis"
     }
@@ -99,6 +110,16 @@ export default function SubmissionList() {
     }
   }
 
+  const cancelSubmission = async (submissionId: string) => {
+    try {
+      await aiService.cancelSubmission(submissionId)
+      await updateSubmissionStatus(submissionId)
+    } catch (err) {
+      console.error("Error cancelling submission:", err)
+      setError("Failed to cancel the analysis")
+    }
+  }
+
   const updateSubmissionStatus = async (submissionId: string) => {
     try {
       const status = await aiService.getProcessingStatus(submissionId)
@@ -110,6 +131,9 @@ export default function SubmissionList() {
                 ...sub,
                 status: mapStatus(status.status),
                 dashboardId: status.dashboardId,
+                progress: status.progress,
+                step: status.step ?? undefined,
+                error: status.error ?? undefined,
               }
             : sub,
         ),
@@ -129,19 +153,38 @@ export default function SubmissionList() {
         return <CheckCircle className="w-5 h-5 text-green-500" />
       case "analyzing":
         return <Clock className="w-5 h-5 text-blue-500" />
+      case "failed":
+        return <AlertTriangle className="w-5 h-5 text-red-500" />
       default:
         return <FileText className="w-5 h-5 text-gray-500" />
     }
   }
 
-  const getStatusText = (status: string) => {
-    switch (status) {
+  const getStatusText = (submission: Submission) => {
+    switch (submission.status) {
       case "pending_review":
         return "Pending Review"
       case "analyzing":
-        return "Analyzing"
+        return typeof submission.progress === "number" && submission.progress > 0
+          ? `Analyzing (${submission.progress}%)`
+          : "Analyzing"
+      case "failed":
+        return "Failed"
       default:
         return "Pending Analysis"
+    }
+  }
+
+  const statusClasses = (status: string) => {
+    switch (status) {
+      case "pending_review":
+        return "bg-green-100 text-green-800"
+      case "analyzing":
+        return "bg-blue-100 text-blue-800"
+      case "failed":
+        return "bg-red-100 text-red-800"
+      default:
+        return "bg-gray-100 text-gray-800"
     }
   }
 
@@ -219,13 +262,15 @@ export default function SubmissionList() {
                 <td className="px-6 py-5 whitespace-nowrap">
                   <div className="flex items-center">
                     <div
-                      className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center 
+                      className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center
                       ${
                         submission.status === "pending_review"
                           ? "bg-green-100"
                           : submission.status === "analyzing"
                             ? "bg-blue-100"
-                            : "bg-gray-100"
+                            : submission.status === "failed"
+                              ? "bg-red-100"
+                              : "bg-gray-100"
                       }`}
                     >
                       {getStatusIcon(submission.status)}
@@ -233,21 +278,25 @@ export default function SubmissionList() {
                     <div className="ml-4">
                       <div className="text-sm font-medium text-gray-900">{submission.id}</div>
                       <div className="text-sm text-gray-500">{submission.name}</div>
+                      {submission.status === "failed" && submission.error && (
+                        <div className="text-xs text-red-600 mt-1 max-w-md break-words" title={submission.error}>
+                          {submission.error}
+                        </div>
+                      )}
+                      {/* IMP-009: what the job is actually doing, not just a % */}
+                      {submission.status === "analyzing" && submission.step && (
+                        <div className="text-xs text-blue-600 mt-1">{submission.step}</div>
+                      )}
                     </div>
                   </div>
                 </td>
                 <td className="px-6 py-5 whitespace-nowrap">
                   <span
-                    className={`px-3 py-1.5 inline-flex text-sm font-medium rounded-full 
-                    ${
-                      submission.status === "pending_review"
-                        ? "bg-green-100 text-green-800"
-                        : submission.status === "analyzing"
-                          ? "bg-blue-100 text-blue-800"
-                          : "bg-gray-100 text-gray-800"
-                    }`}
+                    className={`px-3 py-1.5 inline-flex text-sm font-medium rounded-full ${statusClasses(
+                      submission.status,
+                    )}`}
                   >
-                    {getStatusText(submission.status)}
+                    {getStatusText(submission)}
                   </span>
                 </td>
                 <td className="px-6 py-5 whitespace-nowrap text-center">
@@ -278,9 +327,20 @@ export default function SubmissionList() {
                       )}
                     </button>
                   ) : submission.status === "analyzing" ? (
-                    <div className="inline-flex items-center px-4 py-2 bg-blue-100 text-blue-800 rounded-md">
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      <span>Analyzing...</span>
+                    <div className="inline-flex items-center space-x-2">
+                      <div className="inline-flex items-center px-4 py-2 bg-blue-100 text-blue-800 rounded-md">
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        <span>Analyzing...</span>
+                      </div>
+                      {/* IMP-010: a run used to be unstoppable once started. */}
+                      <button
+                        className="inline-flex items-center px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md"
+                        onClick={() => cancelSubmission(submission.id)}
+                        title="Stop this analysis"
+                      >
+                        <X className="w-4 h-4 mr-1" />
+                        <span>Cancel</span>
+                      </button>
                     </div>
                   ) : (
                     <button

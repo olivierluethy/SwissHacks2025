@@ -13,11 +13,15 @@ try {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // BUG-021: both checks were disabled, which is how a ReferenceError (COLORS)
+  // and an unguarded array access shipped to production. TypeScript is enforced
+  // again; ESLint stays off in the build only because the project has no eslint
+  // config yet - run `npx tsc --noEmit` in CI.
   eslint: {
     ignoreDuringBuilds: true,
   },
   typescript: {
-    ignoreBuildErrors: true,
+    ignoreBuildErrors: false,
   },
   images: {
     unoptimized: true,

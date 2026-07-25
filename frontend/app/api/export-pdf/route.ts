@@ -4,11 +4,16 @@ export async function POST(req: NextRequest) {
   try {
     const json = await req.json()
 
-    // Forward the request to the backend service
-    const response = await fetch("http://localhost:8000/generate-pdf", {
+    // BUG-022: honour API_URL like the proxy route does; this was hardcoded to
+    // port 8000, so PDF export broke whenever the backend ran anywhere else.
+    const apiUrl = process.env.API_URL || "http://localhost:8000"
+    const response = await fetch(`${apiUrl}/generate-pdf`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...(process.env.API_TOKEN
+          ? { Authorization: `Bearer ${process.env.API_TOKEN}` }
+          : {}),
       },
       body: JSON.stringify(json),
     })
