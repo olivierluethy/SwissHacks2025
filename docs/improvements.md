@@ -56,6 +56,107 @@ Verified on 2026-07-26 against a clean start of both services.
 
 ---
 
+## Status ledger
+
+**Every finding in §5–§7, with its current state.** Check here before starting
+work on anything below — most of it is already done.
+
+Legend: ✅ fixed and verified · 🟡 partly done, remainder noted · ⭕ open
+
+### Bugs
+
+| ID | Status | Where / note |
+|---|---|---|
+| BUG-001 | ✅ | `2223cc4` — `tempfile` removed from `requirements.txt` |
+| BUG-002 | ✅ | `3c8f0a8` — date-fns 3, react-day-picker 9, vaul 1; plain `npm install` works |
+| BUG-003 | ✅ | `d2a5d5a` — `clean_and_parse_json` deleted; `schemas.py` + `llm.structured` |
+| BUG-004 | ✅ | `d2a5d5a` — `chunking.py`, `retrieval.py`, `scripts/build_index.py` |
+| BUG-005 | ✅ | `3c8f0a8` — sync handlers; polls 7.645 s → 1.2–5.5 ms |
+| BUG-006 | ✅ | `3c8f0a8` — mock fallbacks removed from `ai.service.ts` |
+| BUG-007 | ✅ | `3c8f0a8`, `d2a5d5a` — real status + error surfaced |
+| BUG-008 | ✅ | `3c8f0a8` — polling resumes after reload |
+| BUG-009 | ✅ | `d2a5d5a` — `jobs.claim()`; second start returns 409 |
+| BUG-010 | ✅ | `d2a5d5a` — `recover_all_processing()` at boot + 120 s call timeout |
+| BUG-011 | ✅ | `3c8f0a8` — `COLORS` hoisted to module scope |
+| BUG-012 | ✅ | `3c8f0a8` — empty chart data renders an empty state |
+| BUG-013 | ✅ | `d2a5d5a` — generator replaced by `scripts/build_index.py` |
+| BUG-014 | ✅ | `d2a5d5a` — POSIX keys via `as_posix()` |
+| BUG-015 | ✅ | `3c8f0a8` — per-request `mkdtemp()` |
+| BUG-016 | ✅ | `3c8f0a8` — `/generate-pdf` is a sync handler |
+| BUG-017 | ✅ | `3c8f0a8` — `AIQueryError` instead of `HTTPException` in a background task |
+| BUG-018 | ✅ | `d2a5d5a` — one `contentId` per selection |
+| BUG-019 | ✅ | `3c8f0a8` — persisted to `data/feedback/*.jsonl` |
+| BUG-020 | ✅ | `d2a5d5a` — `params` awaited |
+| BUG-021 | 🟡 | `d2a5d5a` — TypeScript re-enabled, 0 errors, build passes. **ESLint is still `ignoreDuringBuilds`** because the project has no ESLint config; adding one is open. |
+| BUG-022 | ✅ | `d2a5d5a` — `export-pdf` honours `API_URL` |
+| BUG-023 | ✅ | `3c8f0a8` — duplicate dependency keys removed |
+| BUG-024 | ✅ | `3c8f0a8` — only `package-lock.json` kept |
+| BUG-025 | ✅ | `3c8f0a8` — timezone-aware timestamps |
+| BUG-026 | ✅ | `d2a5d5a` — dead parameter gone with `cached_ai_query` |
+| BUG-027 | 🟡 | `d2a5d5a` — cache split into `data/llm_cache/` vs `data/ai_cached/`. **No TTL or size cap yet**; both still grow without bound. |
+
+### Improvements
+
+| ID | Status | Where / note |
+|---|---|---|
+| IMP-001 | ✅ | `3c8f0a8`, rebuilt in `d2a5d5a` — aggregates run concurrently |
+| IMP-002 | ✅ | `3c8f0a8` — singletons; retrieval 3.5 s → 0.017–0.068 s |
+| IMP-003 | ✅ | `d2a5d5a` — SSE end to end, including through the Next proxy |
+| IMP-004 | ✅ | `d2a5d5a` — map-reduce over cached per-document summaries |
+| IMP-005 | 🟡 | `d2a5d5a` + `4af80ae` — timeout 120 s, `max_completion_tokens`, `reasoning_effort=low`, default model switched to a non-reasoning one. **The benchmark itself has never been run** — no API key. Run `scripts/benchmark_models.py`. |
+| IMP-006 | ✅ | `d2a5d5a` — structured outputs + Pydantic validation |
+| IMP-007 | ✅ | `d2a5d5a` — chunk-level retrieval both sides |
+| IMP-008 | ✅ | `d2a5d5a` + `4af80ae` — content-hash cache for summaries and responses |
+| IMP-009 | ✅ | `d2a5d5a` — per-step progress, not 0/33/66/100 |
+| IMP-010 | ✅ | `d2a5d5a` — `POST /submissions/{id}/cancel` + UI button |
+| IMP-011 | ✅ | `3c8f0a8` — structured logging, no payloads |
+| IMP-012 | 🟡 | `d2a5d5a` — index is a gitignored `.npz` artifact. **The 50 MB blob is still in git history**; rewriting it is your call. |
+| IMP-013 | ✅ | `d2a5d5a` + `4af80ae` — 100 backend tests |
+| IMP-014 | ✅ | `3c8f0a8`, `d2a5d5a` — README rewritten |
+| IMP-015 | ✅ | `d2a5d5a` — `POST /submissions` accepts uploads |
+| IMP-016 | ✅ | `d2a5d5a` — `config.py`, paths from `__file__`, env-overridable |
+| IMP-017 | ✅ | `d2a5d5a` — dead constants removed |
+
+### Security
+
+| ID | Status | Where / note |
+|---|---|---|
+| SEC-001 | ✅ | `3c8f0a8`, `d2a5d5a` — containment check; traversal returns 404 (verified) |
+| SEC-002 | 🟡 | `d2a5d5a` — bearer token on every route, injected server-side. **No per-user scoping** — one shared token, everyone sees every submission. Deliberate: there is no user model. |
+| SEC-003 | ✅ | `3c8f0a8` — origin allowlist (verified not reflected) |
+| SEC-004 | ✅ | `d2a5d5a` — untrusted content fenced and labelled as data |
+| SEC-005 | ✅ | `d2a5d5a` — DOMPurify in `components/safe-html.tsx` |
+| SEC-006 | ✅ | `3c8f0a8` — payloads never logged |
+| SEC-007 | ✅ | `d2a5d5a` — `/results` mount is opt-in; cache dirs separated |
+| SEC-008 | 🟡 | `d2a5d5a` — documented in [`data-handling.md`](data-handling.md). **The policy decisions in that file have no owner yet.** |
+| SEC-009 | 🟡 | `d2a5d5a` — 13 → 3 vulnerabilities, 0 critical. The remaining 3 are transitive (`postcss`, `sharp`) and need a `next` major bump. |
+| SEC-010 | ✅ | `d2a5d5a` — confirmed clean; `.env.example` added |
+| **SEC-011** | ⭕ | **NEW — found after the audit. Not yet fixed.** See below. |
+
+### Cost
+
+| ID | Status | Where / note |
+|---|---|---|
+| COST-001 | ✅ | Map-reduce removes the 3× duplication |
+| COST-002 | ✅ | Last 10 turns only, plus a cached summaries block |
+| COST-003 | ✅ | Feedback revises one section, not the whole dashboard |
+| COST-004 | ✅ | Retrieval fixed, so context tokens are no longer wasted |
+| COST-005 | 🟡 | Prompts now lead with a static prefix (`SYSTEM_RULES`), which is cache-friendly. **Never measured** — no API key. |
+| COST-006 | ✅ | Model and index are process-wide singletons |
+
+### SEC-011 — API token committed into the git remote URL
+
+| | |
+|---|---|
+| **Severity** | **Critical** |
+| **Status** | ⭕ **Open — needs you, I cannot rotate a credential** |
+| **Evidence** | `git remote -v` → `https://ghp_***@github.com/olivierluethy/SwissHacks2025.git`, stored in plaintext in `.git/config` |
+| **Impact** | Anyone with read access to that machine, a backup, or a copy of the repo directory has push access to the GitHub account. |
+| **Fix** | Rotate the token at <https://github.com/settings/tokens>, then `git remote set-url origin https://github.com/olivierluethy/SwissHacks2025.git` and use a credential helper or SSH. |
+| **Also** | GitHub reports 74 Dependabot alerts on the default branch (2 critical, 33 high) — a superset of the npm findings in SEC-009, including Python dependencies. |
+
+---
+
 **Audit date:** 2026-07-25
 **Repo state:** branch `main`, commit `f54dae6` ("Delete unused files"), working tree clean at start
 **Scope:** analysis only. No features were built, nothing was refactored. The only code changes are the two minimal fixes needed to start the app (see §11).
@@ -335,6 +436,12 @@ Same measurement for the smaller submissions:
 
 > **Three sequential OpenAI calls to `o3-mini`, each carrying the entire submission corpus (~97,800 tokens) as one un-chunked prompt, with no streaming, no concurrency, and no timeout.**
 
+> #### ✅ Resolved — see [4.3b](#43b-what-was-actually-done-about-it)
+>
+> All five components of this diagnosis have been addressed. Do not re-do this
+> work; the remaining caveat is that **no production model call has ever been
+> made against the new code**.
+
 The reasoning: local work is **4.27 s, measured**. You describe runs as "extremely long". Every second beyond ~4 is spent inside `client.chat.completions.create` at `main.py:180`. That is arithmetic on a measurement, not an inference.
 
 **`UNVERIFIED — hypothesis (no API key available):`** for `o3-mini` at ~98k input tokens with a multi-thousand-token JSON output, a realistic per-call latency is **45–180 s**, giving **~2.5–9 minutes** per analysis run. Three data points support the upper end being plausible rather than pessimistic:
@@ -342,6 +449,49 @@ The reasoning: local work is **4.27 s, measured**. You describe runs as "extreme
 - `o3-mini` is a **reasoning** model — it emits hidden reasoning tokens before the first output token, so time-to-first-token and total latency are far higher than for `gpt-4o-mini`-class models at the same prompt size.
 - No `max_completion_tokens` is set anywhere, so the model is free to think and write as long as it likes.
 - The installed SDK defaults (verified from `openai 2.48.0`) are `DEFAULT_TIMEOUT = Timeout(connect=5.0, read=600, write=600, pool=600)` and `DEFAULT_MAX_RETRIES = 2`. The code overrides neither. **Worst case for one call is 3 × 600 s = 30 minutes; worst case for a run is 90 minutes**, with the UI showing nothing but a spinner the whole time.
+
+### 4.3b What was actually done about it
+
+Each clause of the diagnosis above, and where it now stands:
+
+| Clause of the bottleneck | Resolution |
+|---|---|
+| **Three sequential calls** | The three aggregates run concurrently, and so does every step feeding them (`pipeline.py`). |
+| **Entire corpus (~97,800 tokens) per call** | Map-reduce: each document is summarised once and cached by content hash; aggregation runs over the summaries, a few thousand tokens. |
+| **Un-chunked prompt** | `chunking.py` splits on the encoder's own tokenizer; oversized documents are sliced and the slices are summarised concurrently. |
+| **No streaming** | Chat streams over SSE end to end. The analysis run is not streamed — it produces structured JSON — but it reports per-step progress instead. |
+| **No concurrency** | Bounded globally by a semaphore in `llm.py` (`MAX_CONCURRENT_LLM_CALLS`), so nested fan-out cannot multiply real concurrency. |
+| **No timeout** | 120 s explicit, replacing the SDK's 600 s × 2 retries. |
+| **`o3-mini` is a reasoning model doing formatting work** | Default switched to a fast non-reasoning model; `reasoning_effort` defaults to `low` if a reasoning model is chosen. `OPENAI_MODEL=o3-mini` restores the old behaviour exactly. |
+
+**Two bottlenecks were introduced by the first round of fixes and then removed.**
+Both were the same mistake the audit named — sequential calls that could overlap:
+
+- `summarise_document` summarised the slices of one large document in a loop, so
+  a 126 KB wording cost 3 calls end to end.
+- `load_summaries_text` summarised documents in a sequential dict comprehension
+  **on every chat message and every feedback click**, with no cache. A cold chat
+  message therefore paid N sequential model calls *before the first token could
+  stream* — which defeated the streaming work entirely.
+
+Measured with a stubbed model at a fixed 1.0 s per call, on a 7-document
+submission (2 of them large enough to slice → 14 model calls; fully sequential
+would be 14.0 s):
+
+| | Before | After |
+|---|---|---|
+| Analysis run | 4.09 s | **3.08 s** |
+| Chat preparation, cold cache | 11.00 s | **2.00 s** |
+| Chat preparation, every subsequent message | 11.00 s | **0.001 s** (0 model calls) |
+
+The stub isolates orchestration from real model speed: these numbers say how
+well the pipeline overlaps its calls, not how fast the model is. Scale them by
+your real per-call latency. Pinned by four regression tests in
+`tests/test_pipeline.py`.
+
+**Still unverified:** the per-call latency estimate of 45–180 s in §4.3 was never
+measured, and still has not been — no API key. Run one real analysis, then
+`scripts/benchmark_models.py`, to replace the estimate with a number.
 
 ### 4.4 The checklist you asked for
 
@@ -377,6 +527,8 @@ The reasoning: local work is **4.27 s, measured**. You describe runs as "extreme
 
 ## 5. Bug list
 
+> **Status:** every row below has been actioned — see the [Status ledger](#status-ledger) for what is fixed, partly done, or open. The Description and Evidence columns describe the code as it was on 2026-07-25.
+
 | ID | Severity | Area | Description | Evidence (file:line) | Suggested fix | Effort |
 |---|---|---|---|---|---|---|
 | BUG-001 | **Critical** | Setup | `pip install -r requirements.txt` fails outright: `tempfile` is a stdlib module, not a PyPI package. Nobody can install the backend from a clean checkout. | `backend/requirements.txt:8` (pre-fix); measured: `ERROR: Could not find a version that satisfies the requirement tempfile (from versions: none)` | Remove the line (**done**, §11). Also pin versions and split `marker-pdf` into a separate `requirements-parsing.txt` — it pulls 5.6 GB of CUDA wheels the API never uses. | S |
@@ -411,6 +563,8 @@ The reasoning: local work is **4.27 s, measured**. You describe runs as "extreme
 
 ## 6. Improvement list
 
+> **Status:** every row below has been actioned — see the [Status ledger](#status-ledger) for what is fixed, partly done, or open. The Description and Evidence columns describe the code as it was on 2026-07-25.
+
 Sorted by impact-to-effort ratio.
 
 | ID | Severity | Area | Description | Evidence (file:line) | Suggested fix | Effort |
@@ -436,6 +590,8 @@ Sorted by impact-to-effort ratio.
 ---
 
 ## 7. Security & cost findings
+
+> **Status:** every row below has been actioned — see the [Status ledger](#status-ledger) for what is fixed, partly done, or open. The Description and Evidence columns describe the code as it was on 2026-07-25.
 
 ### 7.1 Security & privacy
 

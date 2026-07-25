@@ -21,6 +21,7 @@ checked at every checkpoint (IMP-010).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -96,16 +97,24 @@ def summarise_document(source: str, text: str) -> FileSummary:
             label=f"summary:{source}",
         )
 
-    parts: List[FileSummary] = []
-    for i, piece in enumerate(slices):
-        parts.append(
-            llm.structured(
-                prompts.summarise_file(f"{source} (part {i + 1}/{len(slices)})", piece),
-                FileSummary,
-                model=config.SUMMARY_MODEL_NAME,
-                label=f"summary:{source}#{i}",
-            )
+    # The slices of one document are independent, so they run concurrently.
+    # Summarising them in a loop reintroduced exactly the "sequential calls that
+    # could be parallel" problem the audit named as the dominant bottleneck -
+    # a 126 KB wording became 3 calls end to end.
+    def summarise_slice(index: int) -> FileSummary:
+        return llm.structured(
+            prompts.summarise_file(
+                f"{source} (part {index + 1}/{len(slices)})", slices[index]
+            ),
+            FileSummary,
+            model=config.SUMMARY_MODEL_NAME,
+            label=f"summary:{source}#{index}",
         )
+
+    with ThreadPoolExecutor(max_workers=len(slices)) as pool:
+        # Ordered results: part 2 must not end up before part 1 in the summary.
+        parts: List[FileSummary] = list(pool.map(summarise_slice, range(len(slices))))
+
     return FileSummary(
         summary="\n\n".join(p.summary for p in parts),
         figures=[figure for p in parts for figure in p.figures],
@@ -122,17 +131,20 @@ def render_summaries(summaries: Dict[str, FileSummary]) -> str:
     return "\n\n".join(blocks)
 
 
-def build_summaries(
-    submission_id: str, documents: List[Tuple[str, str]]
+def summarise_all(
+    documents: List[Tuple[str, str]], on_progress=None
 ) -> Dict[str, FileSummary]:
-    """Map step: one cached summary per document, run concurrently."""
+    """Summarise every document concurrently.
+
+    Shared by the analysis run and the chat/feedback paths so neither can drift
+    back into a sequential loop. Actual API concurrency is bounded globally by
+    the semaphore in llm.py, not by this pool's size.
+    """
     summaries: Dict[str, FileSummary] = {}
     total = len(documents)
     done = 0
 
-    jobs.update(submission_id, progress=5, step=f"summarising 0/{total} documents")
-
-    with ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_LLM_CALLS) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(total, config.MAX_CONCURRENT_LLM_CALLS))) as pool:
         futures = {
             pool.submit(summarise_document, source, text): source
             for source, text in documents
@@ -141,15 +153,29 @@ def build_summaries(
             source = futures[future]
             summaries[source] = future.result()
             done += 1
-            jobs.update(
-                submission_id,
-                # Map phase occupies 5-55% of the bar.
-                progress=5 + int(done / total * 50),
-                step=f"summarising {done}/{total} documents",
-            )
+            if on_progress:
+                on_progress(done, total)
 
     # Preserve input order for a stable prompt (and therefore a stable cache key).
     return {source: summaries[source] for source, _ in documents}
+
+
+def build_summaries(
+    submission_id: str, documents: List[Tuple[str, str]]
+) -> Dict[str, FileSummary]:
+    """Map step: one cached summary per document."""
+    total = len(documents)
+    jobs.update(submission_id, progress=5, step=f"summarising 0/{total} documents")
+
+    def report(done: int, of: int) -> None:
+        jobs.update(
+            submission_id,
+            # Map phase occupies 5-55% of the bar.
+            progress=5 + int(done / of * 50),
+            step=f"summarising {done}/{of} documents",
+        )
+
+    return summarise_all(documents, on_progress=report)
 
 
 def build_dashboard(
@@ -201,14 +227,47 @@ def persist(submission_id: str, dashboard: Dashboard) -> None:
     )
 
 
+def _summaries_cache_path(documents: List[Tuple[str, str]]):
+    """Content-addressed path for the rendered summaries of a document set."""
+    digest = hashlib.sha256()
+    for source, text in documents:
+        digest.update(source.encode())
+        digest.update(b"\x00")
+        digest.update(hashlib.sha256(text.encode()).digest())
+    config.LLM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return config.LLM_CACHE_DIR / f"summaries_{digest.hexdigest()}.md"
+
+
 def load_summaries_text(submission_id: str) -> str:
-    """Summaries for chat / feedback, rebuilt from cache when possible."""
+    """Rendered summaries for the chat and feedback paths.
+
+    Two problems this had to solve:
+
+    - It summarised documents in a sequential dict comprehension, so a cold
+      chat message paid N model calls end to end *before* the first token could
+      stream - defeating the point of streaming.
+    - It redid that work on every single message.
+
+    The rendered text is now cached against the hash of the documents' contents,
+    so it is one file read unless a source document actually changed, and the
+    cold path is concurrent.
+    """
     folder = config.SUBMISSIONS_DIR / submission_id
     documents = read_submission_files(folder)
-    summaries = {
-        source: summarise_document(source, text) for source, text in documents
-    }
-    return render_summaries(summaries)
+
+    cache_path = _summaries_cache_path(documents)
+    if cache_path.exists():
+        try:
+            return cache_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+
+    rendered = render_summaries(summarise_all(documents))
+    try:
+        cache_path.write_text(rendered, encoding="utf-8")
+    except OSError as e:
+        logger.warning("pipeline.summary_cache_write_failed error=%s", e)
+    return rendered
 
 
 def run(submission_id: str) -> None:
@@ -222,6 +281,14 @@ def run(submission_id: str) -> None:
         _check_cancel(submission_id)
         summaries = build_summaries(submission_id, documents)
         summaries_text = render_summaries(summaries)
+        # Prime the cache the chat and feedback paths read, so the first
+        # question after an analysis does not redo the map step.
+        try:
+            _summaries_cache_path(documents).write_text(
+                summaries_text, encoding="utf-8"
+            )
+        except OSError as e:
+            logger.warning("pipeline.summary_cache_write_failed error=%s", e)
 
         _check_cancel(submission_id)
         jobs.update(submission_id, progress=58, step="retrieving reference material")

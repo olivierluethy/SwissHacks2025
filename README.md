@@ -139,8 +139,9 @@ Full list in [`backend/.env.example`](backend/.env.example). The ones that matte
 |---|---|---|
 | `OPENAI_API_KEY` | — | **Required.** The process will not start without it. |
 | `API_TOKEN` | unset | When set, every endpoint requires `Authorization: Bearer <token>`. **Unset means the API is completely open** — fine locally, not otherwise. |
-| `OPENAI_MODEL` | `o3-mini` | Model for the three aggregate generations. |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Model for the three aggregate generations. Set `o3-mini` to restore the original reasoning model. |
 | `OPENAI_SUMMARY_MODEL` | `gpt-4o-mini` | Model for per-document summarisation. |
+| `OPENAI_REASONING_EFFORT` | `low` | Only sent to reasoning models (`o*`, `gpt-5`). |
 | `OPENAI_TIMEOUT_SECONDS` | `120` | Per-call timeout. The SDK default is 600 s with 2 retries. |
 | `CORS_ALLOW_ORIGINS` | `http://localhost:3000` | Comma-separated allowlist. Never `*` — credentials are enabled. |
 | `PORT` | `8000` | Backend port. |

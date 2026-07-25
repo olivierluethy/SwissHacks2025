@@ -31,11 +31,16 @@ def _float(env: str, default: float) -> float:
 
 
 # --- Model -----------------------------------------------------------------
-# Default left as o3-mini so analysis quality does not change silently. Use
-# scripts/benchmark_models.py to pick a faster one for your data, then set
-# OPENAI_MODEL. The per-file summary step is new, so it defaults to a cheap
-# model - it is extraction, not reasoning.
-MODEL_NAME = os.environ.get("OPENAI_MODEL", "o3-mini")
+# Audit section 4.3 named the model itself as part of the dominant bottleneck:
+# o3-mini is a reasoning model, and it was doing summarisation and JSON
+# formatting. Now that the map-reduce change has cut the aggregate prompt from
+# ~97,800 tokens to a few thousand, per-call latency is dominated by reasoning
+# tokens rather than input size, so the reasoning model is the remaining cost.
+#
+# The default is therefore a fast non-reasoning model. To restore the previous
+# behaviour exactly:  export OPENAI_MODEL=o3-mini
+# Compare them on your own data with scripts/benchmark_models.py.
+MODEL_NAME = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 SUMMARY_MODEL_NAME = os.environ.get("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 
 # IMP-005: the SDK defaults are a 600 s read timeout and 2 retries, so a single
@@ -43,8 +48,10 @@ SUMMARY_MODEL_NAME = os.environ.get("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 OPENAI_TIMEOUT_SECONDS = _float("OPENAI_TIMEOUT_SECONDS", 120.0)
 OPENAI_MAX_RETRIES = _int("OPENAI_MAX_RETRIES", 2)
 MAX_COMPLETION_TOKENS = _int("OPENAI_MAX_COMPLETION_TOKENS", 8000)
-# Only sent for reasoning models (o*/gpt-5 families).
-REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium")
+# Only sent for reasoning models (o*/gpt-5 families). Defaults to "low": if you
+# do opt back into a reasoning model, hidden reasoning tokens are the single
+# largest latency term, and this work is mostly extraction and formatting.
+REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "low")
 
 # --- Retrieval -------------------------------------------------------------
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")

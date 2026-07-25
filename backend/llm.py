@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 from typing import Iterator, Optional, Type, TypeVar
 
@@ -32,6 +33,15 @@ logger = logging.getLogger("archre.llm")
 T = TypeVar("T", bound=BaseModel)
 
 _client: Optional[OpenAI] = None
+
+# One global cap on in-flight model calls.
+#
+# The pipeline nests pools - documents fan out, and a large document fans out
+# again across its slices - so bounding each pool separately would let the real
+# concurrency multiply. A semaphore here caps actual API calls regardless of how
+# the callers are nested, and cannot deadlock: it is acquired around the request
+# only, never held while waiting on another task.
+_call_slots = threading.Semaphore(config.MAX_CONCURRENT_LLM_CALLS)
 
 
 class AIQueryError(RuntimeError):
@@ -138,12 +148,13 @@ def structured(
 
     started = time.perf_counter()
     try:
-        response = get_client().chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format=_response_format(schema),
-            **_token_params(model),
-        )
+        with _call_slots:
+            response = get_client().chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format=_response_format(schema),
+                **_token_params(model),
+            )
     except Exception as e:
         logger.error("llm.error label=%s model=%s error=%s", label, model, e)
         raise AIQueryError(str(e)) from e

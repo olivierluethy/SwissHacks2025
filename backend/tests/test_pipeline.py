@@ -245,3 +245,112 @@ def test_large_document_is_sliced_for_summarisation(monkeypatch):
     pipeline.run("florida")
 
     assert len(slices) > 1, "a document larger than the slice budget must be split"
+
+
+# ---------------------------------------------------------------------------
+# Concurrency (audit section 4.3 - the dominant bottleneck)
+# ---------------------------------------------------------------------------
+def test_document_slices_are_summarised_concurrently(monkeypatch):
+    """A large document used to be summarised one slice at a time."""
+    import threading
+    import time
+
+    in_flight = []
+    peak = [0]
+    lock = threading.Lock()
+
+    def fake_structured(prompt, schema, **kwargs):
+        if schema is FileSummary:
+            with lock:
+                in_flight.append(1)
+                peak[0] = max(peak[0], len(in_flight))
+            time.sleep(0.15)
+            with lock:
+                in_flight.pop()
+            return FileSummary(summary="s", figures=[])
+        if schema is Overview:
+            return Overview(title="t", markdown="m")
+        if schema is KeyInsights:
+            return KeyInsights(insights=[])
+        return Tabs(tabs=[])
+
+    monkeypatch.setattr(config, "SUMMARY_SLICE_TOKENS", 100)  # ~400 chars/slice
+    make_submission(files={"big.md": "x" * 2000})  # -> 5 slices
+    monkeypatch.setattr(pipeline.llm, "structured", fake_structured)
+    jobs.claim("florida")
+
+    pipeline.run("florida")
+
+    assert peak[0] > 1, "slices of one document must overlap, not run end to end"
+
+
+def test_chat_prep_summarises_concurrently_and_then_caches(monkeypatch):
+    """load_summaries_text ran N sequential calls on *every* chat message."""
+    import threading
+    import time
+
+    calls = []
+    peak = [0]
+    in_flight = []
+    lock = threading.Lock()
+
+    def fake_structured(prompt, schema, **kwargs):
+        with lock:
+            calls.append(kwargs.get("label"))
+            in_flight.append(1)
+            peak[0] = max(peak[0], len(in_flight))
+        time.sleep(0.15)
+        with lock:
+            in_flight.pop()
+        return FileSummary(summary="s", figures=[])
+
+    make_submission(files={f"d{i}.md": f"content {i}" for i in range(4)})
+    monkeypatch.setattr(pipeline.llm, "structured", fake_structured)
+
+    first = pipeline.load_summaries_text("florida")
+    assert len(calls) == 4
+    assert peak[0] > 1, "documents must be summarised concurrently"
+
+    calls.clear()
+    second = pipeline.load_summaries_text("florida")
+
+    assert second == first
+    assert calls == [], "a second call must be served from the cache"
+
+
+def test_summary_cache_invalidates_when_a_document_changes(monkeypatch):
+    calls = []
+
+    def fake_structured(prompt, schema, **kwargs):
+        calls.append(kwargs.get("label"))
+        return FileSummary(summary="s", figures=[])
+
+    folder = make_submission(files={"a.md": "original"})
+    monkeypatch.setattr(pipeline.llm, "structured", fake_structured)
+
+    pipeline.load_summaries_text("florida")
+    assert len(calls) == 1
+
+    calls.clear()
+    (folder / "a.md").write_text("changed", encoding="utf-8")
+    pipeline.load_summaries_text("florida")
+    assert len(calls) == 1, "changed content must not be served from the cache"
+
+
+def test_run_primes_the_chat_summary_cache(monkeypatch):
+    """The first question after an analysis must not redo the map step."""
+    stub_llm(monkeypatch)
+    make_submission(files={"a.md": "x", "b.md": "y"})
+    jobs.claim("florida")
+    pipeline.run("florida")
+
+    calls = []
+
+    def counting(prompt, schema, **kwargs):
+        calls.append(schema.__name__)
+        return FileSummary(summary="s", figures=[])
+
+    monkeypatch.setattr(pipeline.llm, "structured", counting)
+    pipeline.load_summaries_text("florida")
+
+    assert calls == [], "analysis should have already populated the summary cache"
