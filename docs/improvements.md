@@ -103,15 +103,15 @@ Legend: ✅ fixed and verified · 🟡 partly done, remainder noted · ⭕ open
 | IMP-002 | ✅ | `3c8f0a8` — singletons; retrieval 3.5 s → 0.017–0.068 s |
 | IMP-003 | ✅ | `d2a5d5a` — SSE end to end, including through the Next proxy |
 | IMP-004 | ✅ | `d2a5d5a` — map-reduce over cached per-document summaries |
-| IMP-005 | 🟡 | `d2a5d5a` + `4af80ae` — timeout 120 s, `max_completion_tokens`, `reasoning_effort=low`, default model switched to a non-reasoning one. **The benchmark itself has never been run** — no API key. Run `scripts/benchmark_models.py`. |
+| IMP-005 | 🟡 | `d2a5d5a` + the §4.3b follow-up — timeout 120 s, `max_completion_tokens`, `reasoning_effort=low`, default model switched to a non-reasoning one. **The benchmark itself has never been run** — no API key. Run `scripts/benchmark_models.py`. |
 | IMP-006 | ✅ | `d2a5d5a` — structured outputs + Pydantic validation |
 | IMP-007 | ✅ | `d2a5d5a` — chunk-level retrieval both sides |
-| IMP-008 | ✅ | `d2a5d5a` + `4af80ae` — content-hash cache for summaries and responses |
+| IMP-008 | ✅ | `d2a5d5a` + the §4.3b follow-up — content-hash cache for summaries and responses |
 | IMP-009 | ✅ | `d2a5d5a` — per-step progress, not 0/33/66/100 |
 | IMP-010 | ✅ | `d2a5d5a` — `POST /submissions/{id}/cancel` + UI button |
 | IMP-011 | ✅ | `3c8f0a8` — structured logging, no payloads |
 | IMP-012 | 🟡 | `d2a5d5a` — index is a gitignored `.npz` artifact. **The 50 MB blob is still in git history**; rewriting it is your call. |
-| IMP-013 | ✅ | `d2a5d5a` + `4af80ae` — 100 backend tests |
+| IMP-013 | ✅ | `d2a5d5a` + the §4.3b follow-up — 100 backend tests |
 | IMP-014 | ✅ | `3c8f0a8`, `d2a5d5a` — README rewritten |
 | IMP-015 | ✅ | `d2a5d5a` — `POST /submissions` accepts uploads |
 | IMP-016 | ✅ | `d2a5d5a` — `config.py`, paths from `__file__`, env-overridable |
