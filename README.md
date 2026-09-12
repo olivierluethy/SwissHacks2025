@@ -1,4 +1,18 @@
-# ReInsight — AI-Powered Reinsurance Analytics
+<div align="center">
+  <img src="frontend/public/logo.png" alt="ReInsight logo" width="260" />
+  <h1>ReInsight — AI-Powered Reinsurance Analytics</h1>
+  <p><b>An LLM underwriting assistant for reinsurance submissions.</b><br/>Reads pre-processed submissions, generates an aggregated analysis and dashboard, and lets an underwriter interrogate it conversationally. Built at SwissHacks 2025.</p>
+  <p>
+    <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
+    <img alt="Next.js" src="https://img.shields.io/badge/Next.js_15-000000?logo=nextdotjs&logoColor=white">
+    <img alt="React" src="https://img.shields.io/badge/React_19-61DAFB?logo=react&logoColor=black">
+    <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white">
+    <img alt="Python" src="https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white">
+    <img alt="OpenAI" src="https://img.shields.io/badge/OpenAI-412991?logo=openai&logoColor=white">
+  </p>
+</div>
+
+---
 
 Official repo of the Arch Re project (SwissHacks 2025).
 
@@ -276,3 +290,12 @@ The headline items:
 1. Branch: `git checkout -b feature/your-feature`
 2. Commit using [Conventional Commits](https://www.conventionalcommits.org/)
 3. Open a pull request
+
+## License
+
+Released under the [MIT License](LICENSE) © 2026 Olivier Lüthy. You're free to use, modify and distribute this
+software, including commercially, as long as the copyright notice and license are included.
+
+## Author
+
+Built by **Olivier Lüthy** — [GitHub](https://github.com/olivierluethy).
